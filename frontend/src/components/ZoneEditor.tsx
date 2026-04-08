@@ -1,12 +1,24 @@
 import { useRef, useState, useCallback } from "react";
 import type { Zone } from "../types";
-import { createZone, deleteZone } from "../api/client";
+import { createZone, deleteZone, createFurniture } from "../api/client";
+import HeightSlider from "./HeightSlider";
+
+interface SweepConfig {
+  panMin: number;
+  panMax: number;
+  tiltMin: number;
+  tiltMax: number;
+}
 
 interface ZoneEditorProps {
   zones: Zone[];
-  canvasEl: HTMLCanvasElement | null;
+  panoramaBase64: string | null;
+  sweepConfig: SweepConfig;
   onSave: () => void;
   onCancel: () => void;
+  /** Angle-space polygon drawn from the live feed */
+  feedDrawnPolygon?: number[][] | null;
+  onClearFeedDraw?: () => void;
 }
 
 function simplifyPoints(points: number[][], tolerance: number): number[][] {
@@ -50,27 +62,108 @@ function simplifyPoints(points: number[][], tolerance: number): number[][] {
   return rdp(points, 0, points.length - 1, tolerance);
 }
 
-export default function ZoneEditor({ zones, canvasEl, onSave, onCancel }: ZoneEditorProps) {
+const MODE_LABELS: Record<string, { label: string; desc: string; color: string }> = {
+  "2d": { label: "2D Flat", desc: "Standard flat zone — no height", color: "var(--text-tertiary)" },
+  "auto_3d": { label: "Auto 3D", desc: "Uses depth camera to estimate volume", color: "var(--cyan)" },
+  "manual_3d": { label: "Manual 3D", desc: "You set the height range manually", color: "var(--amber)" },
+};
+
+/** Render a 3D prism in SVG — base polygon with extruded walls */
+function Prism3D({ polygon, heightMin, heightMax, color, maxHeight = 300 }: {
+  polygon: number[][];
+  heightMin: number;
+  heightMax: number;
+  color: string;
+  maxHeight?: number;
+}) {
+  if (polygon.length < 3 || heightMax <= heightMin) return null;
+
+  // Scale: 1 unit of height = some visual offset in Y (going "up" = negative Y)
+  // and a small X offset for the oblique projection feel
+  const hScale = 0.15; // how much Y offset per unit of normalized height
+  const xSkew = 0.04;  // slight horizontal offset for depth illusion
+  const normalizedHeight = (heightMax - heightMin) / maxHeight;
+  const offsetY = -normalizedHeight * hScale;
+  const offsetX = normalizedHeight * xSkew;
+
+  const basePath = `M ${polygon.map(([x, y]) => `${x},${y}`).join(" L ")} Z`;
+  const topPolygon = polygon.map(([x, y]) => [x + offsetX, y + offsetY]);
+  const topPath = `M ${topPolygon.map(([x, y]) => `${x},${y}`).join(" L ")} Z`;
+
+  // Side walls — connect each base vertex to its top counterpart
+  const wallPaths = polygon.map(([bx, by], i) => {
+    const [tx, ty] = topPolygon[i];
+    const ni = (i + 1) % polygon.length;
+    const [bnx, bny] = polygon[ni];
+    const [tnx, tny] = topPolygon[ni];
+    return `M ${bx},${by} L ${tx},${ty} L ${tnx},${tny} L ${bnx},${bny} Z`;
+  });
+
+  return (
+    <g>
+      {/* Side walls */}
+      {wallPaths.map((d, i) => (
+        <path key={`wall-${i}`} d={d} fill="rgba(168, 85, 247, 0.08)" stroke={color} strokeWidth="0.002" strokeDasharray="0.006 0.004" />
+      ))}
+      {/* Base */}
+      <path d={basePath} fill="rgba(245, 158, 11, 0.18)" stroke={color} strokeWidth="0.003" strokeDasharray="0.01 0.005" />
+      {/* Top face */}
+      <path d={topPath} fill="rgba(168, 85, 247, 0.2)" stroke={color} strokeWidth="0.003" />
+    </g>
+  );
+}
+
+export default function ZoneEditor({
+  zones, panoramaBase64, sweepConfig, onSave, onCancel,
+  feedDrawnPolygon, onClearFeedDraw,
+}: ZoneEditorProps) {
+  const containerRef = useRef<HTMLDivElement>(null);
   const [rawPoints, setRawPoints] = useState<number[][]>([]);
   const [isDrawing, setIsDrawing] = useState(false);
   const [zoneName, setZoneName] = useState("");
+  const [zoneMode, setZoneMode] = useState<"2d" | "auto_3d" | "manual_3d">("2d");
+  const [heightMin, setHeightMin] = useState(0);
+  const [heightMax, setHeightMax] = useState(75);
+  const [saving, setSaving] = useState(false);
+  const [drawSource, setDrawSource] = useState<"panorama" | "feed">("panorama");
 
-  const points = rawPoints.length > 2 ? simplifyPoints(rawPoints, 0.005) : rawPoints;
+  // If a polygon was drawn on the live feed, use it
+  const hasFeedDraw = feedDrawnPolygon && feedDrawnPolygon.length >= 3;
+  // For panorama draws, simplify raw points
+  const panoPoints = rawPoints.length > 2 ? simplifyPoints(rawPoints, 0.005) : rawPoints;
+  // The active polygon (either from panorama or feed)
+  const activeAnglePolygon = hasFeedDraw ? feedDrawnPolygon! : null;
+  const activePointCount = hasFeedDraw ? feedDrawnPolygon!.length : panoPoints.length;
+
+  const normalizedToAngle = useCallback((nx: number, ny: number): number[] => {
+    const pan = sweepConfig.panMin + nx * (sweepConfig.panMax - sweepConfig.panMin);
+    const tilt = sweepConfig.tiltMin + ny * (sweepConfig.tiltMax - sweepConfig.tiltMin);
+    return [pan, tilt];
+  }, [sweepConfig]);
+
+  const angleToNormalized = useCallback((pan: number, tilt: number): number[] => {
+    return [
+      (pan - sweepConfig.panMin) / (sweepConfig.panMax - sweepConfig.panMin),
+      (tilt - sweepConfig.tiltMin) / (sweepConfig.tiltMax - sweepConfig.tiltMin),
+    ];
+  }, [sweepConfig]);
 
   const getNormalizedPos = useCallback((e: React.MouseEvent) => {
-    if (!canvasEl) return null;
-    const rect = canvasEl.getBoundingClientRect();
+    if (!containerRef.current) return null;
+    const rect = containerRef.current.getBoundingClientRect();
     const x = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
     const y = Math.max(0, Math.min(1, (e.clientY - rect.top) / rect.height));
     return [x, y];
-  }, [canvasEl]);
+  }, []);
 
   function handlePointerDown(e: React.MouseEvent) {
+    if (hasFeedDraw) return; // already have a polygon from feed
     e.preventDefault();
     const pos = getNormalizedPos(e);
     if (!pos) return;
     setIsDrawing(true);
     setRawPoints([pos]);
+    setDrawSource("panorama");
   }
 
   function handlePointerMove(e: React.MouseEvent) {
@@ -88,12 +181,55 @@ export default function ZoneEditor({ zones, canvasEl, onSave, onCancel }: ZoneEd
     }
   }
 
-  async function handleSaveZone() {
-    if (points.length < 3 || !zoneName.trim()) return;
-    await createZone({ name: zoneName.trim(), polygon: points });
+  function handleClearDraw() {
     setRawPoints([]);
-    setZoneName("");
-    onSave();
+    if (onClearFeedDraw) onClearFeedDraw();
+  }
+
+  async function handleSaveZone() {
+    const totalPoints = hasFeedDraw ? feedDrawnPolygon!.length : panoPoints.length;
+    if (totalPoints < 3 || !zoneName.trim() || saving) return;
+    setSaving(true);
+
+    const name = zoneName.trim();
+    const is3d = zoneMode !== "2d";
+
+    // Get the angle-space polygon
+    let anglePoints: number[][];
+    if (hasFeedDraw) {
+      anglePoints = feedDrawnPolygon!;
+    } else {
+      anglePoints = panoPoints.map(([nx, ny]) => normalizedToAngle(nx, ny));
+    }
+
+    try {
+      if (is3d) {
+        await createFurniture({
+          name,
+          base_polygon: anglePoints,
+          height_min: heightMin,
+          height_max: heightMax,
+        });
+      }
+
+      await createZone({
+        name,
+        polygon: anglePoints,
+        mode: zoneMode,
+        height_min: is3d ? heightMin : 0,
+        height_max: is3d ? heightMax : 0,
+      });
+
+      setRawPoints([]);
+      setZoneName("");
+      setZoneMode("2d");
+      setHeightMin(0);
+      setHeightMax(75);
+      if (onClearFeedDraw) onClearFeedDraw();
+      onSave();
+    } finally {
+      setSaving(false);
+    }
   }
 
   async function handleDeleteZone(id: string) {
@@ -101,59 +237,140 @@ export default function ZoneEditor({ zones, canvasEl, onSave, onCancel }: ZoneEd
     onSave();
   }
 
-  const pathData = rawPoints.length > 1
+  // SVG path for panorama-drawn polygon
+  const panoPathData = rawPoints.length > 1
     ? `M ${rawPoints.map(([x, y]) => `${x},${y}`).join(" L ")}${!isDrawing && rawPoints.length > 2 ? " Z" : ""}`
     : "";
 
-  // Position the SVG overlay to exactly match the canvas
-  const canvasRect = canvasEl?.getBoundingClientRect();
-  const parentRect = canvasEl?.parentElement?.getBoundingClientRect();
-  const offsetTop = canvasRect && parentRect ? canvasRect.top - parentRect.top : 0;
-  const offsetLeft = canvasRect && parentRect ? canvasRect.left - parentRect.left : 0;
+  // SVG path for feed-drawn polygon (convert from angle-space to panorama-normalized)
+  const feedPathData = hasFeedDraw
+    ? (() => {
+        const normalized = feedDrawnPolygon!.map(([pan, tilt]) => angleToNormalized(pan, tilt));
+        return `M ${normalized.map(([x, y]) => `${x},${y}`).join(" L ")} Z`;
+      })()
+    : "";
+
+  const currentPathData = hasFeedDraw ? feedPathData : panoPathData;
+  const canSave = activePointCount >= 3 && zoneName.trim().length > 0 && !saving;
 
   return (
     <>
-      {/* Drawing overlay — positioned exactly over the canvas */}
+      {/* Panorama with drawing overlay */}
       <div
+        ref={containerRef}
         onMouseDown={handlePointerDown}
         onMouseMove={handlePointerMove}
         onMouseUp={handlePointerUp}
         onMouseLeave={() => { if (isDrawing) handlePointerUp(); }}
         style={{
-          position: "absolute",
-          top: offsetTop,
-          left: offsetLeft,
-          width: canvasRect?.width ?? "100%",
-          height: canvasRect?.height ?? "100%",
-          cursor: isDrawing ? "none" : "crosshair",
-          zIndex: 10,
+          position: "relative",
+          cursor: hasFeedDraw ? "default" : (isDrawing ? "none" : "crosshair"),
           userSelect: "none",
-          borderRadius: 8,
-          border: `2px solid ${isDrawing ? "#4cc9f0" : "#f72585"}`,
+          border: `2px solid ${hasFeedDraw ? "var(--cyan)" : isDrawing ? "var(--amber)" : "var(--red)"}`,
           boxSizing: "border-box",
+          overflow: "hidden",
+          minHeight: 120,
+          background: "var(--bg-deep)",
         }}
       >
+        {panoramaBase64 ? (
+          <img
+            src={`data:image/jpeg;base64,${panoramaBase64}`}
+            style={{ width: "100%", display: "block", pointerEvents: "none" }}
+            alt="Panorama"
+          />
+        ) : (
+          <div style={{
+            padding: 40,
+            textAlign: "center",
+            color: "var(--text-ghost)",
+            fontFamily: "var(--font-mono)",
+            fontSize: 12,
+          }}>
+            No panorama yet — use arrow keys to sweep
+          </div>
+        )}
+
         <svg
           style={{
             position: "absolute",
-            top: 0,
-            left: 0,
-            width: "100%",
-            height: "100%",
+            top: 0, left: 0,
+            width: "100%", height: "100%",
             pointerEvents: "none",
           }}
           viewBox="0 0 1 1"
           preserveAspectRatio="none"
         >
-          {pathData && (
-            <path
-              d={pathData}
-              fill={isDrawing ? "none" : "rgba(247, 37, 133, 0.2)"}
-              stroke={isDrawing ? "#4cc9f0" : "#f72585"}
-              strokeWidth="0.004"
-              strokeLinejoin="round"
-              strokeLinecap="round"
-            />
+          {/* Existing zones — with 3D prism rendering */}
+          {zones.map((zone) => {
+            if (!zone.enabled) return null;
+            const is3dZone = zone.mode && zone.mode !== "2d";
+            const zoneNormalized = zone.polygon.map(([pan, tilt]) => angleToNormalized(pan, tilt));
+
+            if (is3dZone && zone.height_max > zone.height_min) {
+              return (
+                <Prism3D
+                  key={zone.id}
+                  polygon={zoneNormalized}
+                  heightMin={zone.height_min}
+                  heightMax={zone.height_max}
+                  color="rgba(245, 158, 11, 0.6)"
+                />
+              );
+            }
+
+            const d = zoneNormalized.length > 1
+              ? `M ${zoneNormalized.map(([x, y]) => `${x},${y}`).join(" L ")} Z`
+              : "";
+            return (
+              <path
+                key={zone.id}
+                d={d}
+                fill="rgba(239, 68, 68, 0.12)"
+                stroke="rgba(239, 68, 68, 0.6)"
+                strokeWidth="0.003"
+                strokeDasharray="0.01 0.005"
+              />
+            );
+          })}
+
+          {/* Current drawing — with live 3D prism when height is set */}
+          {currentPathData && (
+            <>
+              {zoneMode !== "2d" && heightMax > heightMin ? (
+                (() => {
+                  const poly = hasFeedDraw
+                    ? feedDrawnPolygon!.map(([pan, tilt]) => angleToNormalized(pan, tilt))
+                    : (panoPoints.length >= 3 ? panoPoints : []);
+                  return poly.length >= 3 ? (
+                    <Prism3D
+                      polygon={poly}
+                      heightMin={heightMin}
+                      heightMax={heightMax}
+                      color="rgba(245, 158, 11, 0.8)"
+                    />
+                  ) : (
+                    <path
+                      d={currentPathData}
+                      fill="rgba(245, 158, 11, 0.15)"
+                      stroke="var(--amber)"
+                      strokeWidth="0.004"
+                      strokeLinejoin="round"
+                      strokeLinecap="round"
+                    />
+                  );
+                })()
+              ) : (
+                <path
+                  d={currentPathData}
+                  fill={isDrawing ? "none" : "rgba(245, 158, 11, 0.15)"}
+                  stroke="var(--amber)"
+                  strokeWidth="0.004"
+                  strokeLinejoin="round"
+                  strokeLinecap="round"
+                />
+              )}
+            </>
           )}
 
           {isDrawing && rawPoints.length > 0 && (
@@ -161,107 +378,198 @@ export default function ZoneEditor({ zones, canvasEl, onSave, onCancel }: ZoneEd
               cx={rawPoints[0][0]}
               cy={rawPoints[0][1]}
               r="0.01"
-              fill="#4cc9f0"
+              fill="var(--amber)"
               opacity={0.8}
             />
           )}
         </svg>
 
-        {/* Drawing mode label */}
-        <div
-          style={{
-            position: "absolute",
-            top: 8,
-            left: 8,
-            padding: "4px 10px",
-            background: "rgba(247, 37, 133, 0.85)",
-            color: "white",
-            borderRadius: 4,
-            fontFamily: "monospace",
-            fontSize: 11,
+        {/* Mode label */}
+        <div style={{
+          position: "absolute",
+          top: 8, left: 8,
+          display: "flex", gap: 4,
+        }}>
+          <span style={{
+            padding: "3px 10px",
+            background: "rgba(245, 158, 11, 0.85)",
+            color: "var(--bg-deep)",
+            borderRadius: "var(--radius-sm)",
+            fontFamily: "var(--font-mono)",
+            fontSize: 10,
+            fontWeight: 600,
             pointerEvents: "none",
-          }}
-        >
-          DRAW MODE — click and drag to draw zone
+            letterSpacing: "0.04em",
+          }}>
+            {hasFeedDraw ? "DRAWN FROM FEED" : "DRAW ON PANORAMA"}
+          </span>
+          {hasFeedDraw && (
+            <span style={{
+              padding: "3px 10px",
+              background: "rgba(34, 211, 238, 0.2)",
+              color: "var(--cyan)",
+              borderRadius: "var(--radius-sm)",
+              fontFamily: "var(--font-mono)",
+              fontSize: 10,
+              pointerEvents: "none",
+            }}>
+              or draw below on the live feed
+            </span>
+          )}
         </div>
       </div>
 
-      {/* Controls below the feed */}
-      <div style={{ position: "relative", zIndex: 11, marginTop: 8 }}>
-        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+      {/* Controls below */}
+      <div style={{ padding: "10px 12px", background: "var(--bg-base)" }}>
+        {/* Source indicator */}
+        {!hasFeedDraw && panoPoints.length === 0 && (
+          <div style={{
+            padding: "6px 10px",
+            background: "var(--bg-deep)",
+            borderRadius: "var(--radius-sm)",
+            border: "1px dashed var(--border-base)",
+            fontFamily: "var(--font-mono)",
+            fontSize: 10,
+            color: "var(--text-ghost)",
+            textAlign: "center",
+            marginBottom: 8,
+          }}>
+            Draw on the panorama above, or draw directly on the live camera feed below
+          </div>
+        )}
+
+        {/* Name + save row */}
+        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
           <input
             type="text"
             placeholder="Zone name..."
             value={zoneName}
             onChange={(e) => setZoneName(e.target.value)}
-            style={{
-              padding: "8px 12px",
-              background: "#333",
-              border: "1px solid #555",
-              borderRadius: 6,
-              color: "#ccc",
-              fontFamily: "monospace",
-              flex: 1,
-            }}
+            style={{ flex: 1, fontSize: 11 }}
           />
           <button
+            className="btn btn-primary btn-sm"
             onClick={handleSaveZone}
-            disabled={points.length < 3 || !zoneName.trim()}
-            style={{
-              padding: "8px 16px",
-              background: points.length >= 3 && zoneName.trim() ? "#4cc9f0" : "#555",
-              color: points.length >= 3 && zoneName.trim() ? "#1a1a2e" : "#888",
-              border: "none",
-              borderRadius: 6,
-              cursor: points.length >= 3 && zoneName.trim() ? "pointer" : "not-allowed",
-              fontFamily: "monospace",
-            }}
+            disabled={!canSave}
+            style={{ opacity: canSave ? 1 : 0.4 }}
           >
-            Save Zone ({points.length} pts)
+            {saving ? "Saving..." : `Save (${activePointCount} pts)`}
           </button>
-          <button
-            onClick={() => setRawPoints([])}
-            style={{ padding: "8px 16px", background: "#333", color: "#ccc", border: "none", borderRadius: 6, cursor: "pointer", fontFamily: "monospace" }}
-          >
+          <button className="btn btn-sm" onClick={handleClearDraw}>
             Clear
           </button>
-          <button
-            onClick={onCancel}
-            style={{ padding: "8px 16px", background: "#f94144", color: "white", border: "none", borderRadius: 6, cursor: "pointer", fontFamily: "monospace" }}
-          >
+          <button className="btn btn-danger btn-sm" onClick={onCancel}>
             Done
           </button>
         </div>
 
+        {/* Zone type selector */}
+        {activePointCount >= 3 && (
+          <div style={{ marginTop: 10 }}>
+            <div style={{
+              fontFamily: "var(--font-mono)",
+              fontSize: 10,
+              color: "var(--text-ghost)",
+              marginBottom: 6,
+              letterSpacing: "0.04em",
+              textTransform: "uppercase",
+            }}>
+              Zone type
+            </div>
+
+            <div style={{ display: "flex", gap: 4, marginBottom: 6 }}>
+              {(["2d", "auto_3d", "manual_3d"] as const).map((m) => {
+                const cfg = MODE_LABELS[m];
+                const active = zoneMode === m;
+                return (
+                  <button
+                    key={m}
+                    onClick={() => setZoneMode(m)}
+                    style={{
+                      flex: 1,
+                      padding: "8px 6px",
+                      background: active ? "var(--bg-elevated)" : "var(--bg-deep)",
+                      border: `1px solid ${active ? cfg.color : "var(--border-subtle)"}`,
+                      borderRadius: "var(--radius-sm)",
+                      color: active ? cfg.color : "var(--text-ghost)",
+                      cursor: "pointer",
+                      fontFamily: "var(--font-mono)",
+                      fontSize: 10,
+                      fontWeight: active ? 600 : 400,
+                      textAlign: "center",
+                      transition: "all 0.15s",
+                    }}
+                  >
+                    {cfg.label}
+                  </button>
+                );
+              })}
+            </div>
+
+            <div style={{
+              fontFamily: "var(--font-mono)",
+              fontSize: 10,
+              color: "var(--text-ghost)",
+              marginBottom: zoneMode !== "2d" ? 8 : 0,
+              fontStyle: "italic",
+            }}>
+              {MODE_LABELS[zoneMode].desc}
+            </div>
+
+            {zoneMode !== "2d" && (
+              <HeightSlider
+                heightMin={heightMin}
+                heightMax={heightMax}
+                onChangeMin={setHeightMin}
+                onChangeMax={setHeightMax}
+              />
+            )}
+          </div>
+        )}
+
+        {/* Existing zones list */}
         {zones.length > 0 && (
           <div style={{ marginTop: 12 }}>
-            <h3 style={{ color: "#ccc", fontFamily: "monospace", fontSize: 14, marginBottom: 8 }}>
-              Existing Zones
-            </h3>
-            {zones.map((zone) => (
-              <div
-                key={zone.id}
-                style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  alignItems: "center",
-                  padding: "8px 12px",
-                  background: "#222",
-                  borderRadius: 6,
-                  marginBottom: 4,
-                  fontFamily: "monospace",
-                  fontSize: 12,
-                }}
-              >
-                <span style={{ color: "#f94144" }}>{zone.name}</span>
-                <button
-                  onClick={() => handleDeleteZone(zone.id)}
-                  style={{ padding: "4px 8px", background: "#f94144", color: "white", border: "none", borderRadius: 4, cursor: "pointer", fontSize: 11 }}
+            <div className="label" style={{ marginBottom: 6 }}>Existing Zones</div>
+            {zones.map((zone) => {
+              const is3d = zone.mode && zone.mode !== "2d";
+              return (
+                <div
+                  key={zone.id}
+                  style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                    padding: "7px 10px",
+                    background: "var(--bg-deep)",
+                    borderRadius: "var(--radius-sm)",
+                    borderLeft: `3px solid ${is3d ? "var(--amber)" : "var(--red)"}`,
+                    marginBottom: 3,
+                    fontFamily: "var(--font-mono)",
+                    fontSize: 11,
+                  }}
                 >
-                  Delete
-                </button>
-              </div>
-            ))}
+                  <div style={{ display: "flex", flexDirection: "column", gap: 1 }}>
+                    <span style={{ color: is3d ? "var(--amber)" : "var(--red)" }}>
+                      {zone.name}
+                    </span>
+                    <span style={{ fontSize: 9, color: "var(--text-ghost)" }}>
+                      {is3d
+                        ? `${zone.mode === "auto_3d" ? "Auto" : "Manual"} 3D · ${zone.height_min}–${zone.height_max} cm`
+                        : "2D flat"
+                      }
+                    </span>
+                  </div>
+                  <button
+                    className="btn btn-danger btn-sm"
+                    onClick={() => handleDeleteZone(zone.id)}
+                    style={{ padding: "2px 8px", fontSize: 10 }}
+                  >
+                    Delete
+                  </button>
+                </div>
+              );
+            })}
           </div>
         )}
       </div>

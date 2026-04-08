@@ -1,15 +1,12 @@
 from pydantic import BaseModel
 from fastapi import APIRouter
 
-from server.actuator.calibration import CalibrationMap
-from server.actuator.client import ActuatorClient
 from server.config import settings
+from server.panorama.sweep_controller import SweepState
 
 router = APIRouter(prefix="/api/control", tags=["control"])
 
 _armed = True
-_calibration = CalibrationMap()
-_actuator = ActuatorClient(base_url=settings.esp32_actuator_url)
 
 
 class ArmRequest(BaseModel):
@@ -22,30 +19,28 @@ class ManualFireRequest(BaseModel):
     duration_ms: int = 200
 
 
-class CalibrationPointRequest(BaseModel):
-    pixel_x: float
-    pixel_y: float
-    pan_angle: float
-    tilt_angle: float
+class VirtualAngleRequest(BaseModel):
+    pan: float
+    tilt: float
 
 
 def get_armed() -> bool:
     return _armed
 
 
-def get_calibration() -> CalibrationMap:
-    return _calibration
-
-
-def get_actuator() -> ActuatorClient:
-    return _actuator
-
-
 @router.get("/status")
 async def get_status():
+    from server.main import get_sweep_controller
+    sc = get_sweep_controller()
     return {
         "armed": _armed,
-        "calibration_points": len(_calibration._points),
+        "state": sc.state.value if sc else "INIT",
+        "servo_pan": sc.current_pan if sc else 0,
+        "servo_tilt": sc.current_tilt if sc else 0,
+        "dev_mode": settings.dev_mode,
+        "paused": sc.state == SweepState.PAUSED if sc else False,
+        "stopped": sc.state == SweepState.STOPPED if sc else False,
+        "pause_queued": sc.pause_queued if sc else False,
     }
 
 
@@ -58,24 +53,69 @@ async def set_arm(request: ArmRequest):
 
 @router.post("/fire")
 async def manual_fire(request: ManualFireRequest):
-    success = await _actuator.aim_and_fire(
-        pan=request.pan, tilt=request.tilt, duration_ms=request.duration_ms
-    )
-    return {"fired": success, "pan": request.pan, "tilt": request.tilt}
+    from server.main import get_actuator
+    actuator = get_actuator()
+    if settings.dev_mode:
+        return {"fired": True, "pan": request.pan, "tilt": request.tilt, "simulated": True}
+    if actuator:
+        await actuator.goto(request.pan, request.tilt)
+        success = await actuator.fire(request.duration_ms)
+        return {"fired": success, "pan": request.pan, "tilt": request.tilt}
+    return {"fired": False, "error": "No actuator"}
 
 
-@router.post("/calibrate")
-async def add_calibration_point(request: CalibrationPointRequest):
-    _calibration.add_point(
-        pixel_x=request.pixel_x,
-        pixel_y=request.pixel_y,
-        pan_angle=request.pan_angle,
-        tilt_angle=request.tilt_angle,
-    )
-    return {"points_count": len(_calibration._points)}
+@router.post("/virtual-angle")
+async def set_virtual_angle(request: VirtualAngleRequest):
+    """Dev mode: set the virtual servo angle."""
+    from server.main import get_sweep_controller
+    sc = get_sweep_controller()
+    if sc:
+        sc.set_virtual_angle(request.pan, request.tilt)
+    return {"pan": request.pan, "tilt": request.tilt}
 
 
-@router.delete("/calibrate")
-async def clear_calibration():
-    _calibration.clear()
-    return {"points_count": 0}
+@router.post("/pause")
+async def toggle_pause():
+    from server.main import get_sweep_controller
+    sc = get_sweep_controller()
+    if not sc:
+        return {"paused": False}
+    if sc.state == SweepState.PAUSED:
+        sc.resume()
+        return {"paused": False}
+    else:
+        sc.pause()
+        return {"paused": sc.state == SweepState.PAUSED or sc.pause_queued}
+
+
+@router.post("/emergency-stop")
+async def emergency_stop():
+    global _armed
+    from server.main import get_sweep_controller
+    sc = get_sweep_controller()
+    if sc:
+        sc.emergency_stop()
+    _armed = False
+    return {"stopped": True}
+
+
+@router.post("/clear-estop")
+async def clear_estop():
+    global _armed
+    from server.main import get_sweep_controller
+    sc = get_sweep_controller()
+    if sc:
+        sc.clear_emergency_stop()
+    _armed = False
+    return {"stopped": False, "armed": False}
+
+
+@router.post("/calibration-sweep")
+async def start_calibration_sweep():
+    """Trigger a full calibration sweep to rebuild the panorama."""
+    from server.main import get_sweep_controller
+    sc = get_sweep_controller()
+    if sc:
+        sc.current_pan = sc.pan_min
+        sc.state = sc.state.SWEEPING
+    return {"started": True}

@@ -11,6 +11,8 @@ interface CatStat {
   peakHour: string;
 }
 
+const ACCENT_COLORS = ["var(--amber)", "var(--cyan)", "var(--purple)", "var(--red)", "var(--green)"];
+
 export default function CatStats() {
   const [stats, setStats] = useState<CatStat[]>([]);
   const [loading, setLoading] = useState(true);
@@ -40,53 +42,79 @@ export default function CatStats() {
         hourCounts[hour] = (hourCounts[hour] || 0) + 1;
       });
       const peakHourNum = Object.entries(hourCounts).sort(([, a], [, b]) => b - a)[0]?.[0];
-      const peakHour = peakHourNum ? `${peakHourNum}:00-${(parseInt(peakHourNum) + 1) % 24}:00` : "N/A";
+      const peakHour = peakHourNum ? `${peakHourNum}:00` : "N/A";
 
-      return {
-        cat,
-        zapCount: zaps.length,
-        detectCount: detects.length,
-        zapRate: detects.length > 0 ? zaps.length / detects.length : 0,
-        favoriteZone,
-        peakHour,
-      };
+      return { cat, zapCount: zaps.length, detectCount: detects.length, zapRate: detects.length > 0 ? zaps.length / detects.length : 0, favoriteZone, peakHour };
     });
 
     setStats(catStats);
     setLoading(false);
   }
 
-  if (loading) return <p style={{ color: "#888", fontFamily: "monospace", textAlign: "center" }}>Loading stats...</p>;
-  if (stats.length === 0) return <p style={{ color: "#888", fontFamily: "monospace", textAlign: "center" }}>No cats registered yet. Add cats in Settings.</p>;
+  if (loading) {
+    return (
+      <div style={{ textAlign: "center", padding: 32, color: "var(--text-ghost)", fontFamily: "var(--font-mono)", fontSize: 12 }}>
+        Loading...
+      </div>
+    );
+  }
 
-  const colors = ["#f72585", "#4361ee", "#4cc9f0", "#7209b7", "#f94144"];
+  if (stats.length === 0) {
+    return (
+      <div style={{ textAlign: "center", padding: 32, color: "var(--text-ghost)", fontFamily: "var(--font-mono)", fontSize: 12 }}>
+        No cats registered yet
+      </div>
+    );
+  }
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-      {stats.map((stat, i) => (
-        <div key={stat.cat.id} style={{ padding: 16, background: "#222", borderRadius: 8, borderLeft: `4px solid ${colors[i % colors.length]}` }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
-            <span style={{ color: colors[i % colors.length], fontWeight: "bold", fontSize: 16, fontFamily: "monospace" }}>{stat.cat.name}</span>
-          </div>
-          <div style={{ display: "flex", gap: 12, marginBottom: 8 }}>
-            <div style={{ textAlign: "center", padding: "8px 16px", background: `${colors[i % colors.length]}20`, borderRadius: 6 }}>
-              <div style={{ color: colors[i % colors.length], fontSize: 24, fontWeight: "bold", fontFamily: "monospace" }}>{stat.zapCount}</div>
-              <div style={{ color: "#888", fontSize: 11, fontFamily: "monospace" }}>Zaps</div>
+    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+      {stats.map((stat, i) => {
+        const accent = ACCENT_COLORS[i % ACCENT_COLORS.length];
+        return (
+          <div key={stat.cat.id} className="glass-panel-solid" style={{ padding: 14, overflow: "hidden" }}>
+            {/* Cat name */}
+            <div style={{
+              fontFamily: "var(--font-display)",
+              fontSize: 14,
+              fontWeight: 700,
+              color: accent,
+              marginBottom: 10,
+              letterSpacing: "0.02em",
+            }}>
+              {stat.cat.name}
             </div>
-            <div style={{ textAlign: "center", padding: "8px 16px", background: "rgba(76, 201, 240, 0.1)", borderRadius: 6 }}>
-              <div style={{ color: "#4cc9f0", fontSize: 24, fontWeight: "bold", fontFamily: "monospace" }}>{stat.detectCount}</div>
-              <div style={{ color: "#888", fontSize: 11, fontFamily: "monospace" }}>Detections</div>
+
+            {/* Stat row */}
+            <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
+              <div className="stat-card" style={{ flex: 1 }}>
+                <div className="stat-value" style={{ color: accent }}>{stat.zapCount}</div>
+                <div className="stat-label">Zaps</div>
+              </div>
+              <div className="stat-card" style={{ flex: 1 }}>
+                <div className="stat-value" style={{ color: "var(--cyan)" }}>{stat.detectCount}</div>
+                <div className="stat-label">Detects</div>
+              </div>
+              <div className="stat-card" style={{ flex: 1 }}>
+                <div className="stat-value" style={{ color: "var(--text-secondary)" }}>{Math.round(stat.zapRate * 100)}%</div>
+                <div className="stat-label">Rate</div>
+              </div>
             </div>
-            <div style={{ textAlign: "center", padding: "8px 16px", background: "rgba(255,255,255,0.05)", borderRadius: 6 }}>
-              <div style={{ color: "#ccc", fontSize: 24, fontWeight: "bold", fontFamily: "monospace" }}>{Math.round(stat.zapRate * 100)}%</div>
-              <div style={{ color: "#888", fontSize: 11, fontFamily: "monospace" }}>Zap Rate</div>
+
+            {/* Meta */}
+            <div style={{
+              fontFamily: "var(--font-mono)",
+              fontSize: 10,
+              color: "var(--text-ghost)",
+              display: "flex",
+              gap: 12,
+            }}>
+              <span>Peak: {stat.peakHour}</span>
+              <span>Zone: {stat.favoriteZone}</span>
             </div>
           </div>
-          <div style={{ color: "#888", fontSize: 12, fontFamily: "monospace" }}>
-            Peak mischief: {stat.peakHour} | Favorite zone: {stat.favoriteZone}
-          </div>
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }

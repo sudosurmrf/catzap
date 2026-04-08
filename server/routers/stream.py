@@ -9,18 +9,51 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["stream"])
 
-_ws_clients: list[WebSocket] = []
+_feed_clients: list[WebSocket] = []
+_event_clients: list[WebSocket] = []
+_latest_frame: dict | None = None  # {"frame": np.ndarray, "servo_pan": float, "servo_tilt": float}
+
+
+def store_latest_frame(frame, servo_pan: float, servo_tilt: float):
+    """Called from vision loop to cache the latest raw frame for depth queries."""
+    global _latest_frame
+    _latest_frame = {"frame": frame, "servo_pan": servo_pan, "servo_tilt": servo_tilt}
+
+
+def get_latest_frame() -> dict | None:
+    return _latest_frame
+
+
+def has_feed_clients() -> bool:
+    return len(_feed_clients) > 0
 
 
 async def broadcast_to_clients(data: dict):
+    """Broadcast frame data to feed WebSocket clients only."""
+    if not _feed_clients:
+        return
     disconnected = []
-    for ws in _ws_clients:
+    for ws in _feed_clients:
         try:
             await ws.send_json(data)
         except Exception:
             disconnected.append(ws)
     for ws in disconnected:
-        _ws_clients.remove(ws)
+        if ws in _feed_clients:
+            _feed_clients.remove(ws)
+
+
+async def broadcast_event(data: dict):
+    """Broadcast event data to event WebSocket clients only."""
+    disconnected = []
+    for ws in _event_clients:
+        try:
+            await ws.send_json(data)
+        except Exception:
+            disconnected.append(ws)
+    for ws in disconnected:
+        if ws in _event_clients:
+            _event_clients.remove(ws)
 
 
 class MJPEGStreamReader:
@@ -63,24 +96,24 @@ class MJPEGStreamReader:
 @router.websocket("/ws/feed")
 async def video_feed(websocket: WebSocket):
     await websocket.accept()
-    _ws_clients.append(websocket)
-    logger.info("WebSocket client connected")
+    _feed_clients.append(websocket)
+    logger.info("WebSocket feed client connected")
     try:
         while True:
             await websocket.receive_text()
     except WebSocketDisconnect:
-        if websocket in _ws_clients:
-            _ws_clients.remove(websocket)
-        logger.info("WebSocket client disconnected")
+        if websocket in _feed_clients:
+            _feed_clients.remove(websocket)
+        logger.info("WebSocket feed client disconnected")
 
 
 @router.websocket("/ws/events")
 async def event_feed(websocket: WebSocket):
     await websocket.accept()
-    _ws_clients.append(websocket)
+    _event_clients.append(websocket)
     try:
         while True:
             await websocket.receive_text()
     except WebSocketDisconnect:
-        if websocket in _ws_clients:
-            _ws_clients.remove(websocket)
+        if websocket in _event_clients:
+            _event_clients.remove(websocket)

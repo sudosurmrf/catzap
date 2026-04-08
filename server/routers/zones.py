@@ -11,6 +11,11 @@ class ZoneCreate(BaseModel):
     polygon: list[list[float]]
     overlap_threshold: float = 0.3
     cooldown_seconds: int = 3
+    mode: str = "2d"
+    room_polygon: list[list[float]] | None = None
+    height_min: float = 0.0
+    height_max: float = 0.0
+    furniture_id: str | None = None
 
 
 class ZoneUpdate(BaseModel):
@@ -19,6 +24,11 @@ class ZoneUpdate(BaseModel):
     overlap_threshold: float | None = None
     cooldown_seconds: int | None = None
     enabled: bool | None = None
+    mode: str | None = None
+    room_polygon: list[list[float]] | None = None
+    height_min: float | None = None
+    height_max: float | None = None
+    furniture_id: str | None = None
 
 
 @router.post("", status_code=201)
@@ -28,6 +38,11 @@ async def create_zone_endpoint(zone: ZoneCreate):
         polygon=zone.polygon,
         overlap_threshold=zone.overlap_threshold,
         cooldown_seconds=zone.cooldown_seconds,
+        mode=zone.mode,
+        room_polygon=zone.room_polygon,
+        height_min=zone.height_min,
+        height_max=zone.height_max,
+        furniture_id=zone.furniture_id,
     )
     zones = await get_zones()
     return next(z for z in zones if z["id"] == zone_id)

@@ -5,9 +5,10 @@ COCO_CAT_CLASS = 15
 
 
 class CatDetector:
-    def __init__(self, model_path: str = "yolov8n.pt", confidence_threshold: float = 0.5):
+    def __init__(self, model_path: str = "yolov8s.pt", confidence_threshold: float = 0.35, imgsz: int = 1280):
         self.model = YOLO(model_path)
         self.confidence_threshold = confidence_threshold
+        self.imgsz = imgsz
 
     def detect(self, frame: np.ndarray) -> list[dict]:
         """Detect cats in a frame.
@@ -18,7 +19,7 @@ class CatDetector:
         Returns:
             List of dicts with 'bbox' (normalized [x1,y1,x2,y2]) and 'confidence'.
         """
-        results = self.model(frame, verbose=False)
+        results = self.model(frame, imgsz=self.imgsz, verbose=False)
         detections = []
 
         for result in results:

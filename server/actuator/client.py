@@ -36,6 +36,31 @@ class ActuatorClient:
             logger.error(f"Failed to send fire command: {e}")
             return False
 
+    async def goto(self, pan: float, tilt: float) -> bool:
+        """Move servos to a specific angle."""
+        try:
+            response = await self._client.post(
+                f"{self.base_url}/goto",
+                json={"pan": pan, "tilt": tilt},
+                timeout=2.0,
+            )
+            return response.status_code == 200
+        except httpx.RequestError as e:
+            logger.error(f"Failed to send goto command: {e}")
+            return False
+
+    async def stop(self) -> bool:
+        """Stop sweep, hold current position."""
+        try:
+            response = await self._client.post(
+                f"{self.base_url}/stop",
+                timeout=2.0,
+            )
+            return response.status_code == 200
+        except httpx.RequestError as e:
+            logger.error(f"Failed to send stop command: {e}")
+            return False
+
     async def aim_and_fire(self, pan: float, tilt: float, duration_ms: int = 200) -> bool:
         aimed = await self.aim(pan, tilt)
         if aimed:

@@ -21,6 +21,10 @@ export const createZone = (zone: {
   polygon: number[][];
   overlap_threshold?: number;
   cooldown_seconds?: number;
+  mode?: string;
+  room_polygon?: number[][];
+  height_min?: number;
+  height_max?: number;
 }) => fetchJSON<Zone>("/zones", { method: "POST", body: JSON.stringify(zone) });
 
 export const updateZone = (id: string, updates: Partial<Zone>) =>
@@ -43,6 +47,47 @@ export const createCat = (name: string) =>
 
 export const deleteCat = (id: string) =>
   fetchJSON(`/cats/${id}`, { method: "DELETE" });
+
+// Cat Photos
+export const getCatPhotos = (catId: string) =>
+  fetchJSON<{ id: string; file_path: string; source: string; created_at: string }[]>(
+    `/cats/${catId}/photos`
+  );
+
+export const capturePhoto = (catId: string, frameBase64: string, bbox: number[]) =>
+  fetch(`${API_BASE}/cats/${catId}/photos/capture`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ frame_base64: frameBase64, bbox }),
+  }).then((r) => r.json());
+
+export const uploadPhotos = (catId: string, files: FileList) => {
+  const form = new FormData();
+  Array.from(files).forEach((f) => form.append("files", f));
+  return fetch(`${API_BASE}/cats/${catId}/photos/upload`, {
+    method: "POST",
+    body: form,
+  }).then((r) => r.json());
+};
+
+export const deleteCatPhoto = (catId: string, photoId: string) =>
+  fetchJSON(`/cats/${catId}/photos/${photoId}`, { method: "DELETE" });
+
+// Classifier
+export const startTraining = () =>
+  fetchJSON<{ status: string }>("/classifier/train", { method: "POST" });
+
+export const getTrainingStatus = () =>
+  fetchJSON<{ state: string; progress: number; accuracy: number; error: string | null }>(
+    "/classifier/status"
+  );
+
+export const getClassifierInfo = () =>
+  fetchJSON<{
+    model_exists: boolean;
+    per_cat: { name: string; photo_count: number }[];
+    min_photos_required: number;
+  }>("/classifier/info");
 
 // Events
 export const getEvents = (params?: {
@@ -78,19 +123,57 @@ export const manualFire = (pan: number, tilt: number, duration_ms?: number) =>
     body: JSON.stringify({ pan, tilt, duration_ms: duration_ms ?? 200 }),
   });
 
-export const addCalibrationPoint = (
-  pixel_x: number,
-  pixel_y: number,
-  pan_angle: number,
-  tilt_angle: number
-) =>
-  fetchJSON<{ points_count: number }>("/control/calibrate", {
+export const setVirtualAngle = (pan: number, tilt: number) =>
+  fetchJSON("/control/virtual-angle", {
     method: "POST",
-    body: JSON.stringify({ pixel_x, pixel_y, pan_angle, tilt_angle }),
+    body: JSON.stringify({ pan, tilt }),
   });
 
-export const clearCalibration = () =>
-  fetchJSON("/control/calibrate", { method: "DELETE" });
+export const startCalibrationSweep = () =>
+  fetchJSON("/control/calibration-sweep", { method: "POST" });
+
+export const togglePause = () =>
+  fetchJSON<{ paused: boolean }>("/control/pause", { method: "POST" });
+
+export const emergencyStop = () =>
+  fetchJSON<{ stopped: boolean }>("/control/emergency-stop", { method: "POST" });
+
+export const clearEmergencyStop = () =>
+  fetchJSON<{ stopped: boolean; armed: boolean }>("/control/clear-estop", { method: "POST" });
+
+// Spatial / Calibration
+export const getFurniture = () => fetchJSON<any[]>("/spatial/furniture");
+
+export const createFurniture = (furniture: {
+  name: string;
+  base_polygon: number[][];
+  height_min: number;
+  height_max: number;
+}) => fetchJSON("/spatial/furniture", { method: "POST", body: JSON.stringify(furniture) });
+
+export const updateFurniture = (id: string, updates: {
+  name?: string;
+  base_polygon?: number[][];
+  height_min?: number;
+  height_max?: number;
+}) => fetchJSON(`/spatial/furniture/${id}`, { method: "PUT", body: JSON.stringify(updates) });
+
+export const deleteFurniture = (id: string) =>
+  fetchJSON(`/spatial/furniture/${id}`, { method: "DELETE" });
+
+export const estimateHeight = (polygon: number[][]) =>
+  fetchJSON<{ height_min: number; height_max: number; estimated: boolean; reason?: string }>(
+    "/spatial/estimate-height", { method: "POST", body: JSON.stringify({ polygon }) }
+  );
+
+export const getRoomModelStatus = () =>
+  fetchJSON<{ initialized: boolean; width_cm?: number; depth_cm?: number; furniture_count?: number; depth_scale?: number }>("/spatial/room-model/status");
+
+export const calibrateDepthScale = (realDistanceCm: number) =>
+  fetchJSON("/spatial/calibrate-scale", {
+    method: "POST",
+    body: JSON.stringify({ real_distance_cm: realDistanceCm }),
+  });
 
 // WebSocket
 export function connectEventSocket(

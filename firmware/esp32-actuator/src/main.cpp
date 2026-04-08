@@ -5,8 +5,8 @@
 #include <ArduinoJson.h>
 
 // ===== WiFi credentials — update these =====
-const char* ssid = "YOUR_WIFI_SSID";
-const char* password = "YOUR_WIFI_PASSWORD";
+const char* ssid = "Room Forty";
+const char* password = "Lolcats1!";
 
 // ===== Pin definitions =====
 #define PAN_SERVO_PIN   18
@@ -87,6 +87,60 @@ void handleFire() {
     server.send(200, "application/json", response);
 }
 
+void handleGoto() {
+    if (server.method() != HTTP_POST) {
+        server.send(405, "application/json", "{\"error\":\"Method not allowed\"}");
+        return;
+    }
+
+    String body = server.arg("plain");
+    JsonDocument doc;
+    DeserializationError error = deserializeJson(doc, body);
+
+    if (error) {
+        server.send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
+        return;
+    }
+
+    float pan = doc["pan"] | currentPan;
+    float tilt = doc["tilt"] | currentTilt;
+
+    pan = constrain(pan, 0.0, 180.0);
+    tilt = constrain(tilt, 0.0, 180.0);
+
+    panServo.write((int)pan);
+    tiltServo.write((int)tilt);
+    currentPan = pan;
+    currentTilt = tilt;
+
+    String response;
+    JsonDocument respDoc;
+    respDoc["pan"] = pan;
+    respDoc["tilt"] = tilt;
+    serializeJson(respDoc, response);
+    server.send(200, "application/json", response);
+}
+
+void handleStop() {
+    // Hold current position (servos already hold)
+    String response;
+    JsonDocument doc;
+    doc["stopped"] = true;
+    doc["pan"] = currentPan;
+    doc["tilt"] = currentTilt;
+    serializeJson(doc, response);
+    server.send(200, "application/json", response);
+}
+
+void handlePosition() {
+    String response;
+    JsonDocument doc;
+    doc["pan"] = currentPan;
+    doc["tilt"] = currentTilt;
+    serializeJson(doc, response);
+    server.send(200, "application/json", response);
+}
+
 void handleHealth() {
     String response;
     JsonDocument doc;
@@ -122,7 +176,10 @@ void setup() {
     Serial.println(WiFi.localIP());
 
     server.on("/aim", handleAim);
+    server.on("/goto", handleGoto);
     server.on("/fire", handleFire);
+    server.on("/stop", handleStop);
+    server.on("/position", HTTP_GET, handlePosition);
     server.on("/health", handleHealth);
     server.begin();
     Serial.println("Actuator server started on port 80");
