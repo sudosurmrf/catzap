@@ -1,2 +1,32 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+.pytest_cache/
+
+# Node
+node_modules/
+dist/
+.env
+
+# PlatformIO
+firmware/esp32-cam/.pio/
+firmware/esp32-actuator/.pio/
+
+# SQLite
+*.db
+
+# ML models
+server/models/weights/
+server/data/cat_photos/
+
+# Superpowers
 .superpowers/
+
+# Claude
 .claude/
+
+# IDE
+.vscode/
+.idea/
