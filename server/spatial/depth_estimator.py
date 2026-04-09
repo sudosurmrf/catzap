@@ -10,7 +10,8 @@ class DepthEstimator:
         self.depth_scale: float = 1.0
         self._model = None
         self._transform = None
-        self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        # Force CPU to avoid GPU memory competition with YOLO
+        self._device = torch.device("cpu")
 
     def _load_model(self):
         if self._model is not None:

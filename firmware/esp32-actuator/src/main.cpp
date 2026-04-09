@@ -11,11 +11,16 @@ const char* password = "Lolcats1!";
 // ===== Pin definitions =====
 #define PAN_SERVO_PIN   18
 #define TILT_SERVO_PIN  19
-#define SOLENOID_PIN    23
+#define TRIGGER_SERVO_PIN 23
 #define STATUS_LED_PIN   2
+
+// ===== Trigger servo angles — tune these to your water gun =====
+#define TRIGGER_REST_ANGLE  90   // servo position when NOT firing
+#define TRIGGER_FIRE_ANGLE  45   // servo position that presses the trigger
 
 Servo panServo;
 Servo tiltServo;
+Servo triggerServo;
 
 float currentPan = 90.0;
 float currentTilt = 90.0;
@@ -73,10 +78,10 @@ void handleFire() {
 
     Serial.printf("FIRE! Duration: %dms\n", duration_ms);
 
-    digitalWrite(SOLENOID_PIN, HIGH);
+    triggerServo.write(TRIGGER_FIRE_ANGLE);
     digitalWrite(STATUS_LED_PIN, HIGH);
     delay(duration_ms);
-    digitalWrite(SOLENOID_PIN, LOW);
+    triggerServo.write(TRIGGER_REST_ANGLE);
     digitalWrite(STATUS_LED_PIN, LOW);
 
     String response;
@@ -155,15 +160,15 @@ void setup() {
     Serial.begin(115200);
     Serial.println("CatZap Actuator starting...");
 
-    pinMode(SOLENOID_PIN, OUTPUT);
     pinMode(STATUS_LED_PIN, OUTPUT);
-    digitalWrite(SOLENOID_PIN, LOW);
     digitalWrite(STATUS_LED_PIN, LOW);
 
     panServo.attach(PAN_SERVO_PIN);
     tiltServo.attach(TILT_SERVO_PIN);
+    triggerServo.attach(TRIGGER_SERVO_PIN);
     panServo.write(90);
     tiltServo.write(90);
+    triggerServo.write(TRIGGER_REST_ANGLE);
 
     WiFi.begin(ssid, password);
     Serial.print("Connecting to WiFi");

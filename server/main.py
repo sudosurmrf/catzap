@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 
 import cv2
 import numpy as np
+import torch
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -73,11 +74,21 @@ def reload_classifier():
 async def run_vision_loop(app_state: dict):
     global _tile_grid, _sweep_controller, _actuator, _depth_estimator, _room_model, _cat_tracker, _classifier
 
-    detector = CatDetector(
-        model_path=settings.detection_model,
-        confidence_threshold=settings.confidence_threshold,
-        imgsz=settings.detection_imgsz,
-    )
+    logger.info(f"Vision loop starting (dev_mode={settings.dev_mode})")
+    logger.info(f"ESP32-CAM URL: {settings.esp32_cam_url}")
+    logger.info(f"ESP32 Actuator URL: {settings.esp32_actuator_url}")
+
+    try:
+        detector = CatDetector(
+            model_path=settings.detection_model,
+            confidence_threshold=settings.confidence_threshold,
+            imgsz=settings.detection_imgsz,
+        )
+        logger.info("YOLO detector loaded")
+    except Exception as e:
+        logger.error(f"Vision loop failed during init: {e}", exc_info=True)
+        return
+
     _actuator = ActuatorClient(base_url=settings.esp32_actuator_url)
 
     _tile_grid = TileGrid(
@@ -120,6 +131,7 @@ async def run_vision_loop(app_state: dict):
     weights_path = settings.classifier_weights_dir / "cat_classifier.pt"
     _classifier.load(weights_path)
     depth_frame_counter = 0
+    needs_depth = False  # updated each frame based on whether 3D zones exist
 
     # Load persisted furniture into room model
     from server.models.database import get_furniture as db_get_furniture
@@ -154,6 +166,7 @@ async def run_vision_loop(app_state: dict):
 
     last_time = time.time()
     frame_count = 0
+    cached_pano_b64: str | None = None
 
     # Detection smoother: holds recent detections for a grace window so
     # single-frame YOLO misses don't cause flicker.
@@ -290,11 +303,12 @@ async def run_vision_loop(app_state: dict):
 
             # ── Submit inference job if worker is idle ──────
             global _classify_frame_counter, _cached_identities
-            if _infer_queue.empty():
+            frame_count += 1
+            if _infer_queue.empty() and frame_count % settings.frame_skip_n == 0:
                 _classify_frame_counter += 1
                 depth_frame_counter += 1
                 do_classify = (_classify_frame_counter % settings.classify_every_n_frames == 0)
-                do_depth = (depth_frame_counter % settings.depth_run_interval == 0)
+                do_depth = needs_depth and (depth_frame_counter % settings.depth_run_interval == 0)
                 # Copy frame so the worker thread owns its data; drop if queue full
                 try:
                     _infer_queue.put_nowait(
@@ -364,6 +378,8 @@ async def run_vision_loop(app_state: dict):
 
             # Convert detections to angle-space and check zones
             current_zones = await get_zones()
+            has_3d_zones = any(z.get("mode") in ("auto_3d", "manual_3d") for z in current_zones)
+            needs_depth = has_3d_zones
             all_violations = []
             fired = False
             fire_target = None
@@ -475,12 +491,14 @@ async def run_vision_loop(app_state: dict):
                 _, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
                 frame_b64 = base64.b64encode(buffer).decode("utf-8")
 
-                pano_jpeg = _tile_grid.get_panorama_jpeg()
-                pano_b64 = base64.b64encode(pano_jpeg).decode("utf-8") if pano_jpeg else None
+                # Only re-encode panorama when tiles have actually changed
+                if _tile_grid._pano_dirty:
+                    pano_jpeg = _tile_grid.get_panorama_jpeg()
+                    cached_pano_b64 = base64.b64encode(pano_jpeg).decode("utf-8") if pano_jpeg else None
 
                 await broadcast_to_clients({
                     "frame": frame_b64,
-                    "panorama": pano_b64,
+                    "panorama": cached_pano_b64,
                     "detections": detections,
                     "violations": all_violations,
                     "fired": fired,
@@ -493,7 +511,7 @@ async def run_vision_loop(app_state: dict):
                     "occluded_cats": occluded_predictions,
                 })
 
-            await asyncio.sleep(0.01)
+            await asyncio.sleep(settings.vision_loop_interval)
 
     except asyncio.CancelledError:
         pass
@@ -529,7 +547,7 @@ async def lifespan(app: FastAPI):
     vision_task.cancel()
     try:
         await vision_task
-    except asyncio.CancelledError:
+    except (asyncio.CancelledError, Exception):
         pass
     await close_db()
 

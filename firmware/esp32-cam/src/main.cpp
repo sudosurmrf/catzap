@@ -4,8 +4,8 @@
 #include <WebServer.h>
 
 // ===== WiFi credentials — update these =====
-const char* ssid = "YOUR_WIFI_SSID";
-const char* password = "YOUR_WIFI_PASSWORD";
+const char* ssid = "Room Forty";
+const char* password = "Lolcats1!";
 
 // ===== AI-Thinker ESP32-CAM pin definitions =====
 #define PWDN_GPIO_NUM     32
@@ -25,6 +25,9 @@ const char* password = "YOUR_WIFI_PASSWORD";
 #define HREF_GPIO_NUM     23
 #define PCLK_GPIO_NUM     22
 
+// Built-in LED on GPIO 33 (active LOW on AI-Thinker board)
+#define LED_PIN           33
+
 WebServer server(81);
 
 void handleStream() {
@@ -37,7 +40,6 @@ void handleStream() {
     while (client.connected()) {
         camera_fb_t* fb = esp_camera_fb_get();
         if (!fb) {
-            Serial.println("Camera capture failed");
             break;
         }
 
@@ -62,6 +64,10 @@ void handleHealth() {
 void setup() {
     Serial.begin(115200);
     Serial.println("CatZap ESP32-CAM starting...");
+
+    // LED setup — blink to show we're alive
+    pinMode(LED_PIN, OUTPUT);
+    digitalWrite(LED_PIN, LOW);  // ON (active low)
 
     camera_config_t config;
     config.ledc_channel = LEDC_CHANNEL_0;
@@ -91,26 +97,40 @@ void setup() {
 
     esp_err_t err = esp_camera_init(&config);
     if (err != ESP_OK) {
-        Serial.printf("Camera init failed with error 0x%x\n", err);
-        return;
+        // Fast blink = camera error
+        while (true) {
+            digitalWrite(LED_PIN, LOW);
+            delay(100);
+            digitalWrite(LED_PIN, HIGH);
+            delay(100);
+        }
     }
-    Serial.println("Camera initialized");
 
+    // Slow blink = connecting to WiFi
     WiFi.begin(ssid, password);
-    Serial.print("Connecting to WiFi");
     while (WiFi.status() != WL_CONNECTED) {
-        delay(500);
-        Serial.print(".");
+        digitalWrite(LED_PIN, LOW);
+        delay(250);
+        digitalWrite(LED_PIN, HIGH);
+        delay(250);
     }
-    Serial.println();
-    Serial.print("Connected! IP address: ");
-    Serial.println(WiFi.localIP());
+
+    // Solid ON = connected and ready
+    digitalWrite(LED_PIN, LOW);
 
     server.on("/stream", HTTP_GET, handleStream);
     server.on("/health", HTTP_GET, handleHealth);
     server.begin();
-    Serial.println("Stream server started on port 81");
-    Serial.printf("Stream URL: http://%s:81/stream\n", WiFi.localIP().toString().c_str());
+
+    // Triple blink = all good, server running
+    for (int i = 0; i < 3; i++) {
+        digitalWrite(LED_PIN, HIGH);
+        delay(150);
+        digitalWrite(LED_PIN, LOW);
+        delay(150);
+    }
+    // LED stays ON
+    digitalWrite(LED_PIN, LOW);
 }
 
 void loop() {

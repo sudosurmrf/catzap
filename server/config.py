@@ -4,21 +4,22 @@ from pathlib import Path
 
 class Settings(BaseSettings):
     # Dev mode — uses local webcam instead of ESP32-CAM, simulates fire instead of sending HTTP
-    dev_mode: bool = True
+    dev_mode: bool = False
 
     # ESP32 addresses (used when dev_mode=False)
-    esp32_cam_url: str = "http://192.168.1.100:81/stream"
-    esp32_actuator_url: str = "http://192.168.1.101"
+    esp32_cam_url: str = "http://192.168.86.188:81/stream"
+    esp32_actuator_url: str = "http://192.168.86.191"
 
     # Vision
-    detection_model: str = "yolov8s.pt"  # yolov8n.pt (fast) | yolov8s.pt (balanced) | yolov8m.pt (accurate)
-    detection_imgsz: int = 1280  # input resolution for YOLO — higher catches distant cats
+    detection_model: str = "yolov8n.pt"  # yolov8n.pt (fast) | yolov8s.pt (balanced) | yolov8m.pt (accurate)
+    detection_imgsz: int = 640  # input resolution for YOLO — higher catches distant cats
     confidence_threshold: float = 0.35
     classifier_confidence_threshold: float = 0.6
     classifier_uncertain_min: float = 0.3
     classify_every_n_frames: int = 30
     overlap_threshold: float = 0.3
     frame_skip_n: int = 2
+    vision_loop_interval: float = 0.1  # seconds between vision loop iterations (~10 FPS)
 
     # Actuation
     cooldown_default: int = 3

@@ -19,7 +19,9 @@ class CatDetector:
         Returns:
             List of dicts with 'bbox' (normalized [x1,y1,x2,y2]) and 'confidence'.
         """
-        results = self.model(frame, imgsz=self.imgsz, verbose=False)
+        import torch
+        with torch.no_grad():
+            results = self.model(frame, imgsz=self.imgsz, verbose=False)
         detections = []
 
         for result in results:
