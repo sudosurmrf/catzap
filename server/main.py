@@ -78,6 +78,30 @@ async def run_vision_loop(app_state: dict):
     logger.info(f"ESP32-CAM URL: {settings.esp32_cam_url}")
     logger.info(f"ESP32 Actuator URL: {settings.esp32_actuator_url}")
 
+    # Connect to camera FIRST, before loading heavy models
+    cap = None
+    reader = None
+    if settings.dev_mode:
+        logger.info("DEV MODE: Using local webcam with manual angle control")
+        cap = cv2.VideoCapture(0)
+        if not cap.isOpened():
+            logger.error("Failed to open webcam")
+            return
+    else:
+        reader = MJPEGStreamReader(settings.esp32_cam_url)
+        max_connect_retries = 10
+        for attempt in range(1, max_connect_retries + 1):
+            try:
+                await reader.connect()
+                logger.info("Connected to ESP32-CAM stream")
+                break
+            except Exception as e:
+                logger.warning(f"Camera connection attempt {attempt}/{max_connect_retries} failed: {e}", exc_info=True)
+                if attempt == max_connect_retries:
+                    logger.error("Could not connect to ESP32-CAM after all retries — vision loop exiting")
+                    return
+                await asyncio.sleep(3)
+
     try:
         detector = CatDetector(
             model_path=settings.detection_model,
@@ -145,24 +169,6 @@ async def run_vision_loop(app_state: dict):
             height_max=f["height_max"],
             depth_anchored=f["depth_anchored"],
         ))
-
-    # Camera source
-    cap = None
-    reader = None
-    if settings.dev_mode:
-        logger.info("DEV MODE: Using local webcam with manual angle control")
-        cap = cv2.VideoCapture(0)
-        if not cap.isOpened():
-            logger.error("Failed to open webcam")
-            return
-    else:
-        reader = MJPEGStreamReader(settings.esp32_cam_url)
-        try:
-            await reader.connect()
-            logger.info("Connected to ESP32-CAM stream")
-        except Exception as e:
-            logger.error(f"Failed to connect to camera: {e}")
-            return
 
     last_time = time.time()
     frame_count = 0

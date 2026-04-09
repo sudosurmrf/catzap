@@ -7,8 +7,8 @@ class Settings(BaseSettings):
     dev_mode: bool = False
 
     # ESP32 addresses (used when dev_mode=False)
-    esp32_cam_url: str = "http://192.168.86.188:81/stream"
-    esp32_actuator_url: str = "http://192.168.86.191"
+    esp32_cam_url: str = "http://192.168.0.143:81/stream"
+    esp32_actuator_url: str = "http://192.168.0.158"
 
     # Vision
     detection_model: str = "yolov8n.pt"  # yolov8n.pt (fast) | yolov8s.pt (balanced) | yolov8m.pt (accurate)

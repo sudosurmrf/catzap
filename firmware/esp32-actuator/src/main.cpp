@@ -5,7 +5,7 @@
 #include <ArduinoJson.h>
 
 // ===== WiFi credentials — update these =====
-const char* ssid = "Room Forty";
+const char* ssid = "Rebellious Amish Family";
 const char* password = "Lolcats1!";
 
 // ===== Pin definitions =====

@@ -4,7 +4,7 @@
 #include <WebServer.h>
 
 // ===== WiFi credentials — update these =====
-const char* ssid = "Room Forty";
+const char* ssid = "Rebellious Amish Family";
 const char* password = "Lolcats1!";
 
 // ===== AI-Thinker ESP32-CAM pin definitions =====

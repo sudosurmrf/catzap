@@ -1,8 +1,10 @@
 import asyncio
 import logging
+import socket
+import threading
+from urllib.parse import urlparse
 
 import cv2
-import httpx
 import numpy as np
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
@@ -58,96 +60,139 @@ async def broadcast_event(data: dict):
 
 
 class MJPEGStreamReader:
-    """Reads MJPEG frames from the ESP32-CAM HTTP stream with auto-reconnect."""
+    """Reads MJPEG frames from the ESP32-CAM HTTP stream using raw sockets."""
 
     def __init__(self, stream_url: str, max_retries: int = 0):
         self.stream_url = stream_url
-        self._client: httpx.AsyncClient | None = None
-        self._response = None
-        self._stream_ctx = None
-        self._buffer = b""
-        self._byte_iter = None
+        parsed = urlparse(stream_url)
+        self._host = parsed.hostname
+        self._port = parsed.port or 80
+        self._path = parsed.path or "/"
+        self._sock: socket.socket | None = None
         self._connected = False
+        self._stop = threading.Event()
+        self._frame_queue: asyncio.Queue = asyncio.Queue(maxsize=2)
+        self._thread: threading.Thread | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
 
     async def connect(self):
-        await self._open_stream()
-
-    async def _open_stream(self):
-        """Open (or reopen) the MJPEG stream connection."""
-        # Clean up any existing connection first
-        await self._close_stream()
-        self._buffer = b""
-        self._client = httpx.AsyncClient(timeout=None)
-        self._stream_ctx = self._client.stream("GET", self.stream_url)
-        self._response = await self._stream_ctx.__aenter__()
-        self._byte_iter = self._response.aiter_bytes(chunk_size=4096).__aiter__()
-        self._connected = True
-        logger.info("ESP32-CAM stream connected")
-
-    async def _close_stream(self):
-        """Close current stream connection silently."""
-        self._connected = False
-        self._byte_iter = None
-        try:
-            if self._stream_ctx:
-                await self._stream_ctx.__aexit__(None, None, None)
-        except Exception:
-            pass
-        self._stream_ctx = None
-        self._response = None
-        try:
-            if self._client:
-                await self._client.aclose()
-        except Exception:
-            pass
-        self._client = None
-
-    async def _reconnect(self):
-        """Attempt to reconnect to the stream."""
-        logger.info("Reconnecting to ESP32-CAM stream...")
-        try:
-            await self._open_stream()
-            return True
-        except Exception as e:
-            logger.warning(f"Reconnect failed: {e}")
-            return False
-
-    async def read_frame(self) -> np.ndarray | None:
-        if not self._connected:
-            # Try to reconnect
-            await asyncio.sleep(1)
-            if not await self._reconnect():
-                return None
-
-        max_buffer = 2 * 1024 * 1024  # 2MB safety limit
-        while True:
+        """Open the MJPEG stream using a raw socket (bypasses urllib/httpx)."""
+        # Clean up any previous connection
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=2)
+        if self._sock:
             try:
-                chunk = await asyncio.wait_for(self._byte_iter.__anext__(), timeout=5.0)
-            except (StopAsyncIteration, asyncio.TimeoutError, httpx.StreamClosed, httpx.StreamConsumed, Exception) as e:
-                if isinstance(e, asyncio.CancelledError):
-                    raise
-                log_msg = "timed out" if isinstance(e, asyncio.TimeoutError) else str(type(e).__name__)
-                logger.warning(f"ESP32-CAM stream {log_msg}, will reconnect")
-                self._connected = False
-                return None
+                self._sock.close()
+            except Exception:
+                pass
+            self._sock = None
+        self._connected = False
 
-            self._buffer += chunk
-            # Prevent unbounded buffer growth from corrupted streams
-            if len(self._buffer) > max_buffer:
-                start = self._buffer.find(b"\xff\xd8", -max_buffer // 2)
-                self._buffer = self._buffer[start:] if start != -1 else b""
-            start = self._buffer.find(b"\xff\xd8")
-            end = self._buffer.find(b"\xff\xd9")
-            if start != -1 and end != -1 and end > start:
-                jpg_bytes = self._buffer[start : end + 2]
-                self._buffer = self._buffer[end + 2 :]
+        self._loop = asyncio.get_event_loop()
+        logger.info(f"Connecting to ESP32-CAM at {self._host}:{self._port}{self._path}")
+
+        self._sock = socket.create_connection((self._host, self._port), timeout=10)
+        self._sock.settimeout(10)
+
+        # Send minimal HTTP GET
+        request = (
+            f"GET {self._path} HTTP/1.1\r\n"
+            f"Host: {self._host}:{self._port}\r\n"
+            f"Connection: keep-alive\r\n"
+            f"\r\n"
+        )
+        self._sock.sendall(request.encode())
+
+        # Read response headers
+        header_buf = b""
+        while b"\r\n\r\n" not in header_buf:
+            chunk = self._sock.recv(1024)
+            if not chunk:
+                raise ConnectionError("Connection closed while reading headers")
+            header_buf += chunk
+
+        header_text = header_buf.split(b"\r\n\r\n")[0].decode("utf-8", errors="replace")
+        logger.info(f"ESP32-CAM response headers:\n{header_text}")
+
+        # Everything after headers is the start of the body
+        body_start = header_buf.split(b"\r\n\r\n", 1)[1]
+
+        self._sock.settimeout(5)  # read timeout for stream chunks
+        self._connected = True
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._read_loop, args=(body_start,), daemon=True)
+        self._thread.start()
+        logger.info("ESP32-CAM stream connected and reading")
+
+    def _read_loop(self, initial_data: bytes):
+        """Background thread: reads from socket and extracts JPEG frames."""
+        buf = initial_data
+        max_buffer = 2 * 1024 * 1024
+        while not self._stop.is_set():
+            try:
+                chunk = self._sock.recv(4096)
+                if not chunk:
+                    break
+            except socket.timeout:
+                continue  # no data yet, try again
+            except Exception as e:
+                logger.warning(f"ESP32-CAM stream read error: {e}")
+                break
+
+            buf += chunk
+            if len(buf) > max_buffer:
+                start = buf.find(b"\xff\xd8", -max_buffer // 2)
+                buf = buf[start:] if start != -1 else b""
+
+            while True:
+                start = buf.find(b"\xff\xd8")
+                end = buf.find(b"\xff\xd9", start + 2 if start != -1 else 0)
+                if start == -1 or end == -1 or end <= start:
+                    break
+                jpg_bytes = buf[start : end + 2]
+                buf = buf[end + 2 :]
                 frame = cv2.imdecode(
                     np.frombuffer(jpg_bytes, dtype=np.uint8), cv2.IMREAD_COLOR
                 )
-                return frame
+                if frame is not None:
+                    if self._frame_queue.full():
+                        try:
+                            self._frame_queue.get_nowait()
+                        except asyncio.QueueEmpty:
+                            pass
+                    self._loop.call_soon_threadsafe(self._frame_queue.put_nowait, frame)
+
+        self._connected = False
+        logger.info("ESP32-CAM stream read loop ended")
+
+    async def read_frame(self) -> np.ndarray | None:
+        if not self._connected:
+            await asyncio.sleep(1)
+            try:
+                await self.connect()
+            except Exception as e:
+                logger.warning(f"Reconnect failed: {e}")
+                return None
+
+        try:
+            return await asyncio.wait_for(self._frame_queue.get(), timeout=5.0)
+        except asyncio.TimeoutError:
+            logger.warning("ESP32-CAM stream timed out waiting for frame, will reconnect")
+            self._connected = False
+            return None
 
     async def close(self):
-        await self._close_stream()
+        self._stop.set()
+        self._connected = False
+        if self._thread:
+            self._thread.join(timeout=3)
+        try:
+            if self._sock:
+                self._sock.close()
+        except Exception:
+            pass
+        self._sock = None
 
 
 @router.websocket("/ws/feed")
