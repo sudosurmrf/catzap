@@ -9,12 +9,38 @@ def pixel_to_angle(
     fov_h: float | None = None,
     fov_v: float | None = None,
 ) -> tuple[float, float]:
-    """Convert normalized pixel coords (0-1) to angle-space using current servo position."""
+    """Convert normalized pixel coords (0-1) to angle-space using current servo position.
+
+    Analytic pinhole mapping. Sign convention: the right edge of the image
+    (pixel_x = 1) maps to a HIGHER pan angle than the current servo pose,
+    and the bottom of the image (pixel_y = 1) maps to a HIGHER tilt angle.
+    This matches this rig's measured mount orientation — the previous
+    `pan = servo_pan - …` sign was inherited from the old bilinear fit's
+    empirical-learning era and produced targeting that drove *away* from
+    detected cats once the fit was removed.
+    """
     fov_h = fov_h or settings.fov_horizontal
     fov_v = fov_v or settings.fov_vertical
-    pan = servo_pan - (pixel_x - 0.5) * fov_h
+    pan = servo_pan + (pixel_x - 0.5) * fov_h
     tilt = servo_tilt + (pixel_y - 0.5) * fov_v
     return (pan, tilt)
+
+
+def calibrated_pixel_to_angle(
+    pixel_x: float,
+    pixel_y: float,
+    servo_pan: float,
+    servo_tilt: float,
+) -> tuple[float, float]:
+    """Convert pixel → absolute angle via the analytic pinhole formula.
+
+    The pixel→servo bilinear fit was removed in the extent-based calibration
+    rewrite; the new flow captures the safe operational envelope from 4
+    corners and relies on the analytic pinhole for pixel→angle conversion.
+    This function is preserved as a thin wrapper for existing call sites,
+    and lives here so the hot path stays a single function hop.
+    """
+    return pixel_to_angle(pixel_x, pixel_y, servo_pan, servo_tilt)
 
 
 def angle_to_pixel(
@@ -25,10 +51,14 @@ def angle_to_pixel(
     fov_h: float | None = None,
     fov_v: float | None = None,
 ) -> tuple[float, float]:
-    """Convert angle-space coords to normalized pixel coords for current servo position."""
+    """Convert angle-space coords to normalized pixel coords for current servo position.
+
+    Inverse of `pixel_to_angle` — the pan sign matches that function's
+    convention (higher pan = further right in the image).
+    """
     fov_h = fov_h or settings.fov_horizontal
     fov_v = fov_v or settings.fov_vertical
-    pixel_x = 0.5 - (pan - servo_pan) / fov_h
+    pixel_x = 0.5 + (pan - servo_pan) / fov_h
     pixel_y = 0.5 + (tilt - servo_tilt) / fov_v
     return (pixel_x, pixel_y)
 

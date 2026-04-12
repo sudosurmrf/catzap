@@ -13,16 +13,13 @@ class Settings(BaseSettings):
     # Vision
     detection_model: str = "yolov8n.pt"  # yolov8n.pt (fast) | yolov8s.pt (balanced) | yolov8m.pt (accurate)
     detection_imgsz: int = 640  # input resolution for YOLO — higher catches distant cats
-    confidence_threshold: float = 0.35
+    confidence_threshold: float = 0.25  # lowered from 0.35 to catch distant low-confidence cats
     classifier_confidence_threshold: float = 0.6
     classifier_uncertain_min: float = 0.3
     classify_every_n_frames: int = 30
     overlap_threshold: float = 0.3
-    frame_skip_n: int = 2
+    frame_skip_n: int = 1  # submit every frame; the inference worker's empty-queue gate already prevents pile-up
     vision_loop_interval: float = 0.1  # seconds between vision loop iterations (~10 FPS)
-
-    # Actuation
-    cooldown_default: int = 3
 
     # Sweep / Panorama
     sweep_pan_min: float = 30.0
@@ -34,23 +31,19 @@ class Settings(BaseSettings):
     fov_vertical: float = 50.0
     tile_overlap: float = 10.0
     tile_refresh_threshold: int = 15
-    warning_duration: float = 1.5
-    tracking_duration: float = 3.0
-    reentry_warning: float = 0.5
-    lock_on_grace: float = 1.0  # seconds to keep tracking after losing detection during WARNING
 
-    # Depth / Spatial
-    midas_model: str = "MiDaS_small"  # MiDaS model variant
-    depth_run_interval: int = 5  # run depth every Nth tile refresh
-    depth_blend_alpha: float = 0.2  # EMA blend factor for heightmap
-    depth_change_threshold: float = 20.0  # cm change to flag furniture move
-    heightmap_resolution: float = 5.0  # cm per cell
-    room_width_cm: float = 500.0  # room dimensions for model
-    room_depth_cm: float = 500.0
-    room_height_cm: float = 300.0
-    camera_height_cm: float = 150.0  # camera mount height from floor
-    occlusion_timeout: float = 10.0  # seconds before giving up on occluded cat
-    occlusion_grace_frames: int = 3  # frames before declaring cat lost (no occluder)
+    # Engagement
+    min_shot_interval_ms: int = 2000  # minimum time between successive shots while in ENGAGING
+    engagement_grace_ms: int = 3000   # time with no cat-in-zone before ENGAGING → SWEEPING
+
+    # Tracking deadband: if the cat's bbox center is within this radius of the
+    # frame center (normalized [0..1] pixel space), the camera holds position
+    # instead of issuing a new tracking jump. Absorbs small overshoots and
+    # YOLO bbox jitter — without it, the servo would buzz on every frame as
+    # the bbox center wobbles a few pixels. 0.15 ≈ ±15% of frame radius from
+    # center (about ±10° in pan with a 65° FOV). Engagement (zone violations)
+    # bypasses the deadband — we always lock on tightly before firing.
+    tracking_deadband_frac: float = 0.15
 
     # Database (PostgreSQL)
     database_url: str = "postgresql://localhost:5432/catzap"
@@ -64,7 +57,7 @@ class Settings(BaseSettings):
     # Model weights
     classifier_weights_dir: Path = Path("models/weights")
 
-    model_config = {"env_prefix": "CATZAP_", "env_file": ".env"}
+    model_config = {"env_prefix": "CATZAP_", "env_file": ".env", "extra": "ignore"}
 
 
 settings = Settings()

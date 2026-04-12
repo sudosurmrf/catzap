@@ -7,9 +7,10 @@ import Controls from "./components/Controls";
 import ZoneConfigPanel from "./components/ZoneConfigPanel";
 import Settings from "./components/Settings";
 import SweepControls from "./components/SweepControls";
+import AimCalibration from "./components/AimCalibration";
 import type { Zone, Detection, FrameData, ZoneTransform } from "./types";
 import { DEFAULT_TRANSFORM } from "./types";
-import { getZones, setVirtualAngle, updateZone, updateFurniture } from "./api/client";
+import { getZones, setVirtualAngle, updateZone } from "./api/client";
 
 type Panel = "events" | "stats" | "controls" | "settings";
 const EMPTY_DETECTIONS: Detection[] = [];
@@ -25,6 +26,7 @@ const NAV_ITEMS: { id: Panel; icon: string; label: string }[] = [
 
 export default function App() {
   const [panel, setPanel] = useState<Panel>("events");
+  const [aimCalibrationOpen, setAimCalibrationOpen] = useState(false);
   const [zones, setZones] = useState<Zone[]>([]);
   const [editingZones, setEditingZones] = useState(false);
   const [latestPanorama, setLatestPanorama] = useState<string | null>(null);
@@ -35,10 +37,6 @@ export default function App() {
 
   // Pending polygon drawn from either surface (angle-space)
   const [pendingPolygon, setPendingPolygon] = useState<number[][] | null>(null);
-  // Track the zone mode/height selected in the config panel for live preview
-  const [pendingMode, setPendingMode] = useState("2d");
-  const [pendingHeightMin, setPendingHeightMin] = useState(0);
-  const [pendingHeightMax, setPendingHeightMax] = useState(75);
   // Selected zone for editing (move/resize)
   const [selectedZoneId, setSelectedZoneId] = useState<string | null>(null);
   // Transform state for the active polygon (pending or selected zone)
@@ -100,10 +98,7 @@ export default function App() {
         const zone = prev.find((z) => z.id === id);
         if (zone) {
           setOriginalPolygon([...zone.polygon]);
-          setTransform({
-            ...DEFAULT_TRANSFORM,
-            height: zone.height_max > zone.height_min ? zone.height_max : 0,
-          });
+          setTransform({ ...DEFAULT_TRANSFORM });
         }
         return prev;
       });
@@ -119,14 +114,9 @@ export default function App() {
   );
 
   const handleZonePolygonUpdate = useCallback(async (zoneId: string, newPolygon: number[][]) => {
-    const zone = zones.find((z) => z.id === zoneId);
-    if (!zone) return;
     await updateZone(zoneId, { polygon: newPolygon });
-    if (zone.furniture_id) {
-      await updateFurniture(zone.furniture_id, { base_polygon: newPolygon });
-    }
     refreshZones();
-  }, [zones, refreshZones]);
+  }, [refreshZones]);
 
   useEffect(() => {
     function handleKey(e: KeyboardEvent) {
@@ -150,6 +140,7 @@ export default function App() {
       overflow: "hidden",
       background: "var(--bg-deep)",
     }}>
+      <AimCalibration open={aimCalibrationOpen} onClose={() => setAimCalibrationOpen(false)} />
       {/* ── Left sidebar ────────────────────────── */}
       <aside style={{
         width: "var(--sidebar-width)",
@@ -246,9 +237,6 @@ export default function App() {
             drawMode={editingZones && !selectedZoneId && !pendingPolygon}
             onDrawComplete={handleDrawComplete}
             pendingPolygon={pendingPolygon}
-            pendingMode={pendingMode}
-            pendingHeightMin={pendingHeightMin}
-            pendingHeightMax={pendingHeightMax}
             selectedZoneId={editingZones ? selectedZoneId : null}
             onSelectZone={editingZones ? handleSelectZone : undefined}
             onZonePolygonUpdate={handleZonePolygonUpdate}
@@ -270,9 +258,6 @@ export default function App() {
             selectedZoneId={editingZones ? selectedZoneId : null}
             onSelectZone={editingZones ? handleSelectZone : undefined}
             onZonePolygonUpdate={handleZonePolygonUpdate}
-            transform={transform}
-            onTransformChange={setTransform}
-            originalPolygon={originalPolygon}
             pendingPolygon={pendingPolygon}
           />
         </div>
@@ -389,15 +374,13 @@ export default function App() {
               selectedZoneId={selectedZoneId}
               onSelectZone={handleSelectZone}
               onZoneUpdated={refreshZones}
-              transform={transform}
-              onTransformChange={setTransform}
             />
           ) : (
             <>
               {panel === "events" && <EventLog />}
               {panel === "stats" && <CatStats />}
               {panel === "controls" && <Controls servoPan={servoPan} servoTilt={servoTilt} />}
-              {panel === "settings" && <Settings onUpdate={refreshZones} />}
+              {panel === "settings" && <Settings onUpdate={refreshZones} onOpenAimCalibration={() => setAimCalibrationOpen(true)} />}
             </>
           )}
         </div>

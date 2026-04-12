@@ -11,31 +11,26 @@ _pool: asyncpg.Pool | None = None
 # ── In-memory zone cache (invalidated on create/update/delete) ──
 _zone_cache: list[dict] | None = None
 
+# ── Monotonic version counter — bumps on every successful zone mutation ──
+_zones_version: int = 0
+
+
+def get_zones_version() -> int:
+    """Returns a monotonically increasing counter that bumps on every zone write.
+    Callers can compare against a previously-seen value to decide whether to
+    re-fetch zones from the DB. Cheap enough to call every frame."""
+    return _zones_version
+
 
 def invalidate_zone_cache():
-    global _zone_cache
+    global _zone_cache, _zones_version
     _zone_cache = None
+    _zones_version += 1
     # Also clear pre-cached Shapely polygons
     from server.vision.zone_checker import invalidate_poly_cache
     invalidate_poly_cache()
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS zones (
-    id UUID PRIMARY KEY,
-    name TEXT NOT NULL,
-    polygon JSONB NOT NULL,
-    overlap_threshold REAL NOT NULL DEFAULT 0.3,
-    cooldown_seconds INTEGER NOT NULL DEFAULT 3,
-    enabled BOOLEAN NOT NULL DEFAULT TRUE,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-ALTER TABLE zones ADD COLUMN IF NOT EXISTS mode TEXT NOT NULL DEFAULT '2d';
-ALTER TABLE zones ADD COLUMN IF NOT EXISTS room_polygon JSONB;
-ALTER TABLE zones ADD COLUMN IF NOT EXISTS height_min REAL NOT NULL DEFAULT 0.0;
-ALTER TABLE zones ADD COLUMN IF NOT EXISTS height_max REAL NOT NULL DEFAULT 0.0;
-ALTER TABLE zones ADD COLUMN IF NOT EXISTS furniture_id UUID;
-
+SCHEMA_STATIC = """
 CREATE TABLE IF NOT EXISTS cats (
     id UUID PRIMARY KEY,
     name TEXT NOT NULL UNIQUE,
@@ -69,16 +64,6 @@ CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value JSONB NOT NULL
 );
-
-CREATE TABLE IF NOT EXISTS furniture (
-    id UUID PRIMARY KEY,
-    name TEXT NOT NULL,
-    base_polygon JSONB NOT NULL,
-    height_min REAL NOT NULL DEFAULT 0.0,
-    height_max REAL NOT NULL DEFAULT 0.0,
-    depth_anchored BOOLEAN NOT NULL DEFAULT FALSE,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
 """
 
 
@@ -87,7 +72,28 @@ async def init_db(database_url: str | None = None):
     url = database_url or settings.database_url
     _pool = await asyncpg.create_pool(url)
     async with _pool.acquire() as conn:
-        await conn.execute(SCHEMA)
+        await conn.execute(SCHEMA_STATIC)
+        # Wipe and recreate zones (child) before furniture (parent)
+        await conn.execute("DROP TABLE IF EXISTS zones CASCADE")
+        await conn.execute("""
+            CREATE TABLE zones (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                name TEXT NOT NULL,
+                polygon JSONB NOT NULL,
+                overlap_threshold REAL NOT NULL DEFAULT 0.3,
+                enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """)
+        await conn.execute("DROP TABLE IF EXISTS furniture CASCADE")
+        await conn.execute("""
+            CREATE TABLE furniture (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                name TEXT NOT NULL,
+                polygon JSONB NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """)
 
 
 async def close_db():
@@ -107,29 +113,20 @@ async def create_zone(
     name: str,
     polygon: list[list[float]],
     overlap_threshold: float = 0.3,
-    cooldown_seconds: int = 3,
-    mode: str = "2d",
-    room_polygon: list[list[float]] | None = None,
-    height_min: float = 0.0,
-    height_max: float = 0.0,
-    furniture_id: str | None = None,
+    enabled: bool = True,
     conn: asyncpg.Connection | None = None,
 ) -> str:
-    zone_id = uuid.uuid4()
     pool = get_pool()
     c = conn or await pool.acquire()
     try:
-        await c.execute(
-            """INSERT INTO zones (id, name, polygon, overlap_threshold, cooldown_seconds,
-               mode, room_polygon, height_min, height_max, furniture_id)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)""",
-            zone_id, name, json.dumps(polygon), overlap_threshold, cooldown_seconds,
-            mode, json.dumps(room_polygon) if room_polygon is not None else None,
-            height_min, height_max,
-            uuid.UUID(furniture_id) if furniture_id else None,
+        row = await c.fetchrow(
+            """INSERT INTO zones (name, polygon, overlap_threshold, enabled)
+               VALUES ($1, $2, $3, $4)
+               RETURNING id, name, polygon, overlap_threshold, enabled, created_at""",
+            name, json.dumps(polygon), overlap_threshold, enabled,
         )
         invalidate_zone_cache()
-        return str(zone_id)
+        return str(row["id"])
     finally:
         if conn is None:
             await pool.release(c)
@@ -142,21 +139,17 @@ async def get_zones(conn: asyncpg.Connection | None = None) -> list[dict]:
     pool = get_pool()
     c = conn or await pool.acquire()
     try:
-        rows = await c.fetch("SELECT * FROM zones ORDER BY created_at DESC")
+        rows = await c.fetch(
+            "SELECT id, name, polygon, overlap_threshold, enabled, created_at FROM zones ORDER BY created_at DESC"
+        )
         result = [
             {
                 "id": str(row["id"]),
                 "name": row["name"],
                 "polygon": json.loads(row["polygon"]) if isinstance(row["polygon"], str) else row["polygon"],
                 "overlap_threshold": row["overlap_threshold"],
-                "cooldown_seconds": row["cooldown_seconds"],
                 "enabled": row["enabled"],
                 "created_at": row["created_at"].isoformat(),
-                "mode": row["mode"],
-                "room_polygon": json.loads(row["room_polygon"]) if row["room_polygon"] and isinstance(row["room_polygon"], str) else row["room_polygon"],
-                "height_min": row["height_min"],
-                "height_max": row["height_max"],
-                "furniture_id": str(row["furniture_id"]) if row["furniture_id"] else None,
             }
             for row in rows
         ]
@@ -169,15 +162,12 @@ async def get_zones(conn: asyncpg.Connection | None = None) -> list[dict]:
 
 
 async def update_zone(zone_id: str, conn: asyncpg.Connection | None = None, **kwargs) -> bool:
-    allowed = {"name", "polygon", "overlap_threshold", "cooldown_seconds", "enabled",
-               "mode", "room_polygon", "height_min", "height_max", "furniture_id"}
+    allowed = {"name", "polygon", "overlap_threshold", "enabled"}
     updates = {k: v for k, v in kwargs.items() if k in allowed}
     if not updates:
         return False
     if "polygon" in updates:
         updates["polygon"] = json.dumps(updates["polygon"])
-    if "room_polygon" in updates:
-        updates["room_polygon"] = json.dumps(updates["room_polygon"]) if updates["room_polygon"] else None
 
     pool = get_pool()
     c = conn or await pool.acquire()
@@ -339,20 +329,20 @@ async def get_events(
 
 
 async def create_furniture(
-    name: str, base_polygon: list[list[float]],
-    height_min: float = 0.0, height_max: float = 0.0,
-    depth_anchored: bool = False, conn: asyncpg.Connection | None = None,
+    name: str,
+    polygon: list[list[float]],
+    conn: asyncpg.Connection | None = None,
 ) -> str:
-    furniture_id = uuid.uuid4()
     pool = get_pool()
     c = conn or await pool.acquire()
     try:
-        await c.execute(
-            """INSERT INTO furniture (id, name, base_polygon, height_min, height_max, depth_anchored)
-               VALUES ($1, $2, $3, $4, $5, $6)""",
-            furniture_id, name, json.dumps(base_polygon), height_min, height_max, depth_anchored,
+        row = await c.fetchrow(
+            """INSERT INTO furniture (name, polygon)
+               VALUES ($1, $2)
+               RETURNING id, name, polygon, created_at""",
+            name, json.dumps(polygon),
         )
-        return str(furniture_id)
+        return str(row["id"])
     finally:
         if conn is None:
             await pool.release(c)
@@ -362,44 +352,18 @@ async def get_furniture(conn: asyncpg.Connection | None = None) -> list[dict]:
     pool = get_pool()
     c = conn or await pool.acquire()
     try:
-        rows = await c.fetch("SELECT * FROM furniture ORDER BY created_at DESC")
+        rows = await c.fetch(
+            "SELECT id, name, polygon, created_at FROM furniture ORDER BY created_at DESC"
+        )
         return [
             {
                 "id": str(row["id"]),
                 "name": row["name"],
-                "base_polygon": json.loads(row["base_polygon"]) if isinstance(row["base_polygon"], str) else row["base_polygon"],
-                "height_min": row["height_min"],
-                "height_max": row["height_max"],
-                "depth_anchored": row["depth_anchored"],
+                "polygon": json.loads(row["polygon"]) if isinstance(row["polygon"], str) else row["polygon"],
                 "created_at": row["created_at"].isoformat(),
             }
             for row in rows
         ]
-    finally:
-        if conn is None:
-            await pool.release(c)
-
-
-async def update_furniture(furniture_id: str, conn: asyncpg.Connection | None = None, **kwargs) -> bool:
-    allowed = {"name", "base_polygon", "height_min", "height_max", "depth_anchored"}
-    updates = {k: v for k, v in kwargs.items() if k in allowed}
-    if not updates:
-        return False
-    if "base_polygon" in updates:
-        updates["base_polygon"] = json.dumps(updates["base_polygon"])
-
-    pool = get_pool()
-    c = conn or await pool.acquire()
-    try:
-        set_parts = []
-        values = []
-        for i, (k, v) in enumerate(updates.items(), 1):
-            set_parts.append(f"{k} = ${i}")
-            values.append(v)
-        values.append(uuid.UUID(furniture_id))
-        query = f"UPDATE furniture SET {', '.join(set_parts)} WHERE id = ${len(values)}"
-        result = await c.execute(query, *values)
-        return result != "UPDATE 0"
     finally:
         if conn is None:
             await pool.release(c)

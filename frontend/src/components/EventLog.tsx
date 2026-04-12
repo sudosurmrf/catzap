@@ -101,7 +101,7 @@ export default function EventLog() {
           const style = EVENT_STYLES[event.type] || { color: "var(--text-tertiary)", icon: "·" };
           return (
             <div
-              key={event.id}
+              key={event.id || `ws-${event.timestamp}-${i}`}
               style={{
                 display: "flex",
                 alignItems: "flex-start",

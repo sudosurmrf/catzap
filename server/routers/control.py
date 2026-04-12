@@ -1,6 +1,7 @@
 from pydantic import BaseModel
 from fastapi import APIRouter
 
+from server.actuator.client import snap_to_servo_step
 from server.config import settings
 from server.panorama.sweep_controller import SweepState
 
@@ -32,11 +33,14 @@ def get_armed() -> bool:
 async def get_status():
     from server.main import get_sweep_controller
     sc = get_sweep_controller()
+    # Report physical (servo-snapped) pose to keep the frontend display
+    # consistent with where the hardware actually is. Internal state is
+    # kept as a float for precision; the boundary here converts.
     return {
         "armed": _armed,
         "state": sc.state.value if sc else "INIT",
-        "servo_pan": sc.current_pan if sc else 0,
-        "servo_tilt": sc.current_tilt if sc else 0,
+        "servo_pan": snap_to_servo_step(sc.current_pan) if sc else 0,
+        "servo_tilt": snap_to_servo_step(sc.current_tilt) if sc else 0,
         "dev_mode": settings.dev_mode,
         "paused": sc.state == SweepState.PAUSED if sc else False,
         "stopped": sc.state == SweepState.STOPPED if sc else False,
@@ -58,7 +62,10 @@ async def manual_fire(request: ManualFireRequest):
     if settings.dev_mode:
         return {"fired": True, "pan": request.pan, "tilt": request.tilt, "simulated": True}
     if actuator:
-        await actuator.goto(request.pan, request.tilt)
+        # Use direct=True so the manual fire path doesn't queue behind a
+        # stuck sweep goto on the traverse lock — manual fire is a UI action
+        # and needs to feel instant. The servo handles the slew on its own.
+        await actuator.goto(request.pan, request.tilt, direct=True)
         success = await actuator.fire(request.duration_ms)
         return {"fired": success, "pan": request.pan, "tilt": request.tilt}
     return {"fired": False, "error": "No actuator"}
@@ -71,6 +78,10 @@ async def set_virtual_angle(request: VirtualAngleRequest):
     sc = get_sweep_controller()
     if sc:
         sc.set_virtual_angle(request.pan, request.tilt)
+        return {
+            "pan": snap_to_servo_step(sc.current_pan),
+            "tilt": snap_to_servo_step(sc.current_tilt),
+        }
     return {"pan": request.pan, "tilt": request.tilt}
 
 
@@ -108,6 +119,21 @@ async def clear_estop():
         sc.clear_emergency_stop()
     _armed = False
     return {"stopped": False, "armed": False}
+
+
+@router.get("/actuator-logs")
+async def get_actuator_logs():
+    """Proxy the ESP32 actuator's /logs endpoint so clients don't need to
+    know the ESP32's IP. Returns the ring buffer (last ~64 log lines) or
+    an error if the actuator isn't reachable."""
+    from server.main import get_actuator
+    actuator = get_actuator()
+    if actuator is None:
+        return {"error": "Actuator not initialized", "lines": []}
+    logs = await actuator.get_logs()
+    if logs is None:
+        return {"error": "Failed to fetch logs from actuator", "lines": []}
+    return logs
 
 
 @router.post("/calibration-sweep")

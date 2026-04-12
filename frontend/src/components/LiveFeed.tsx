@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from "react";
-import type { Detection, Violation, Zone, FrameData, ZoneTransform } from "../types";
-import { DEFAULT_TRANSFORM } from "../types";
+import type { Detection, Violation, Zone, FrameData } from "../types";
 import StateIndicator from "./StateIndicator";
 import DirectionArrow from "./DirectionArrow";
 import MultiKillOverlay from "./MultiKillOverlay";
@@ -18,49 +17,51 @@ interface LiveFeedProps {
   onFrameData?: (data: FrameData) => void;
   drawMode?: boolean;
   onDrawComplete?: (anglePolygon: number[][]) => void;
-  // Transform / editing props (same as PanoramaView)
   selectedZoneId?: string | null;
   onSelectZone?: (id: string | null) => void;
   onZonePolygonUpdate?: (zoneId: string, newPolygon: number[][]) => void;
-  transform?: ZoneTransform;
-  onTransformChange?: (t: ZoneTransform) => void;
-  originalPolygon?: number[][] | null;
   pendingPolygon?: number[][] | null;
 }
 
 const FOV_H = 65;
 const FOV_V = 50;
 
-// Gizmo constants (matching PanoramaView)
-type GizmoHandle = "none" | "move" | "x-axis" | "y-axis" | "z-axis"
-  | "skew-top" | "skew-right" | "skew-bottom" | "skew-left" | "slant";
+function simplifyPoly(pts: number[][], tol: number): number[][] {
+  if (pts.length <= 3) return pts;
+  function rdp(p: number[][], s: number, e: number): number[][] {
+    let mx = 0, mi = s;
+    const [x1, y1] = p[s], [x2, y2] = p[e];
+    const dx = x2 - x1, dy = y2 - y1, lsq = dx * dx + dy * dy;
+    for (let i = s + 1; i < e; i++) {
+      const [px, py] = p[i];
+      const d = lsq === 0
+        ? Math.sqrt((px - x1) ** 2 + (py - y1) ** 2)
+        : (() => { const t = Math.max(0, Math.min(1, ((px - x1) * dx + (py - y1) * dy) / lsq)); return Math.sqrt((px - x1 - t * dx) ** 2 + (py - y1 - t * dy) ** 2); })();
+      if (d > mx) { mx = d; mi = i; }
+    }
+    if (mx > tol) { const l = rdp(p, s, mi), r = rdp(p, mi, e); return [...l.slice(0, -1), ...r]; }
+    return [p[s], p[e]];
+  }
+  return rdp(pts, 0, pts.length - 1);
+}
 
-const ARROW_LEN = 50;
-const HANDLE_SIZE = 7;
-const SKEW_HANDLE_SIZE = 5;
-const Z_DIR = { x: 0.15, y: -1.0 };
-const Z_LEN = Math.sqrt(Z_DIR.x ** 2 + Z_DIR.y ** 2);
-const Z_UNIT = { x: Z_DIR.x / Z_LEN, y: Z_DIR.y / Z_LEN };
 
 export default function LiveFeed({
   zones, onFrameData, drawMode, onDrawComplete,
   selectedZoneId, onSelectZone, onZonePolygonUpdate,
-  transform = { ...DEFAULT_TRANSFORM }, onTransformChange,
-  originalPolygon, pendingPolygon,
+  pendingPolygon,
 }: LiveFeedProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const overlayRef = useRef<HTMLDivElement>(null);
   const [fps, setFps] = useState(0);
   const [detections, setDetections] = useState<Detection[]>([]);
-  const [violations, setViolations] = useState<Violation[]>([]);
+  const [, setViolations] = useState<Violation[]>([]);
   const [zapFlash, setZapFlash] = useState<FireTarget | null>(null);
   const [firedState, setFiredState] = useState(false);
   const [state, setState] = useState("SWEEPING");
   const [servoPan, setServoPan] = useState(90);
   const [servoTilt, setServoTilt] = useState(45);
-  const [warningRemaining, setWarningRemaining] = useState(0);
   const [directionDelta, setDirectionDelta] = useState<{ pan: number; tilt: number } | null>(null);
-  const [occludedCats, setOccludedCats] = useState<{ id: string; predicted: [number, number, number]; occluded_by: string }[]>([]);
   const zapTimeoutRef = useRef<number | null>(null);
   const latestFrameRef = useRef<string>("");
 
@@ -81,26 +82,13 @@ export default function LiveFeed({
   servoPanRef.current = servoPan;
   servoTiltRef.current = servoTilt;
 
-  // Refs so drawFrame always reads current values (not stale closure)
-  const transformRef = useRef(transform);
-  transformRef.current = transform;
   const zonesRef = useRef(zones);
   zonesRef.current = zones;
   const selectedZoneIdRef = useRef(selectedZoneId);
   selectedZoneIdRef.current = selectedZoneId;
-  const originalPolygonRef = useRef(originalPolygon);
-  originalPolygonRef.current = originalPolygon;
   const pendingPolygonRef = useRef(pendingPolygon);
   pendingPolygonRef.current = pendingPolygon;
-  const activeHandleRef = useRef<GizmoHandle>("none");
   const rightDragZoneIdRef = useRef<string | null>(null);
-
-  // Gizmo drag state
-  const [activeHandle, setActiveHandle] = useState<GizmoHandle>("none");
-  const [dragStartNorm, setDragStartNorm] = useState<{ x: number; y: number } | null>(null);
-  const [dragStartTransform, setDragStartTransform] = useState<ZoneTransform | null>(null);
-  // Keep ref in sync
-  useEffect(() => { activeHandleRef.current = activeHandle; }, [activeHandle]);
 
   // Right-click drag state
   const [rightDragZoneId, setRightDragZoneId] = useState<string | null>(null);
@@ -108,9 +96,6 @@ export default function LiveFeed({
   const [rightDragOrigPoly, setRightDragOrigPoly] = useState<number[][] | null>(null);
   useEffect(() => { rightDragZoneIdRef.current = rightDragZoneId; }, [rightDragZoneId]);
 
-  // Which polygon the gizmo targets
-  const targetPolygon = pendingPolygon || (selectedZoneId ? originalPolygon : null);
-  const showGizmo = !!targetPolygon && targetPolygon.length >= 3;
 
   // ── Coordinate helpers ──────────────────────────
   function angleToPixelNorm(pan: number, tilt: number): [number, number] {
@@ -127,42 +112,29 @@ export default function LiveFeed({
     ];
   }
 
+  // Map a mouse event to [0..1] coordinates relative to the actual canvas
+  // content area — NOT the full container. The canvas uses objectFit: contain
+  // which may letterbox the 4:3 image within a non-4:3 container; without
+  // subtracting the letterbox offset, drawn shapes would appear shifted when
+  // the zone transitions from the SVG overlay to the canvas rendering.
   const getNormPos = useCallback((e: React.MouseEvent) => {
-    if (!overlayRef.current) return null;
-    const rect = overlayRef.current.getBoundingClientRect();
+    const canvas = canvasRef.current;
+    if (!canvas) return null;
+    const rect = canvas.getBoundingClientRect();
+    const bw = canvas.width || 640;
+    const bh = canvas.height || 480;
+    const scale = Math.min(rect.width / bw, rect.height / bh);
+    const cw = bw * scale;
+    const ch = bh * scale;
+    const ox = (rect.width - cw) / 2;
+    const oy = (rect.height - ch) / 2;
     return {
-      x: Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width)),
-      y: Math.max(0, Math.min(1, (e.clientY - rect.top) / rect.height)),
+      x: Math.max(0, Math.min(1, (e.clientX - rect.left - ox) / cw)),
+      y: Math.max(0, Math.min(1, (e.clientY - rect.top - oy) / ch)),
     };
   }, []);
 
-  // ── Transform math (same as PanoramaView) ──────
-  function getCentroid(poly: number[][]): [number, number] {
-    let sx = 0, sy = 0;
-    for (const [x, y] of poly) { sx += x; sy += y; }
-    return [sx / poly.length, sy / poly.length];
-  }
-
-  function applyTransform(poly: number[][], t: ZoneTransform): number[][] {
-    const [cx, cy] = getCentroid(poly);
-    return poly.map(([x, y]) => {
-      let dx = x - cx, dy = y - cy;
-      dx *= t.scaleX; dy *= t.scaleY;
-      return [cx + dx + dy * t.skewX, cy + dy + dx * t.skewY];
-    });
-  }
-
-  function getTransformedPoly(): number[][] | null {
-    if (!targetPolygon || targetPolygon.length < 3) return null;
-    return applyTransform(targetPolygon, transform);
-  }
-
-  // Version that reads from refs (for drawFrame inside WebSocket closure)
-  function getTransformedPolyFromRefs(): number[][] | null {
-    const tp = pendingPolygonRef.current || (selectedZoneIdRef.current ? originalPolygonRef.current : null);
-    if (!tp || tp.length < 3) return null;
-    return applyTransform(tp, transformRef.current);
-  }
+  // ── Geometry helpers ─────────────────────────────
 
   // ── Hit testing ─────────────────────────────────
   function pointInPoly(px: number, py: number, poly: number[][]): boolean {
@@ -176,42 +148,13 @@ export default function LiveFeed({
     return inside;
   }
 
-  function dist(ax: number, ay: number, bx: number, by: number) {
-    return Math.sqrt((ax - bx) ** 2 + (ay - by) ** 2);
-  }
-
-  function hitTestGizmo(nx: number, ny: number): GizmoHandle {
-    const poly = getTransformedPoly();
-    if (!poly) return "none";
-    const normPoly = poly.map(([pan, tilt]) => angleToPixelNorm(pan, tilt));
-    const [cx, cy] = getCentroid(normPoly);
-
-    const arrowScale = 0.08;
-    const HIT_R = 0.025;
-
-    const zEnd = { x: cx + Z_UNIT.x * arrowScale, y: cy + Z_UNIT.y * arrowScale };
-    const xEnd = { x: cx + arrowScale, y: cy };
-    const yEnd = { x: cx, y: cy + arrowScale };
-
-    if (dist(nx, ny, zEnd.x, zEnd.y) < HIT_R) return "z-axis";
-    if (dist(nx, ny, xEnd.x, xEnd.y) < HIT_R) return "x-axis";
-    if (dist(nx, ny, yEnd.x, yEnd.y) < HIT_R) return "y-axis";
-
-    // Skew handles at edge midpoints
-    for (let i = 0; i < normPoly.length && i < 4; i++) {
-      const ni = (i + 1) % normPoly.length;
-      const mx = (normPoly[i][0] + normPoly[ni][0]) / 2;
-      const my = (normPoly[i][1] + normPoly[ni][1]) / 2;
-      if (dist(nx, ny, mx, my) < HIT_R * 0.8) {
-        if (i === 0) return "skew-top";
-        if (i === 1) return "skew-right";
-        if (i === 2) return "skew-bottom";
-        return "skew-left";
-      }
+  function hitTestZone(nx: number, ny: number): string | null {
+    for (const zone of zones) {
+      if (!zone.enabled) continue;
+      const normPoly = zone.polygon.map(([pan, tilt]) => angleToPixelNorm(pan, tilt));
+      if (pointInPoly(nx, ny, normPoly)) return zone.id;
     }
-
-    if (pointInPoly(nx, ny, normPoly)) return "move";
-    return "none";
+    return null;
   }
 
   // ── WebSocket ───────────────────────────────────
@@ -238,9 +181,7 @@ export default function LiveFeed({
         setState(data.state || "SWEEPING");
         setServoPan(data.servo_pan ?? 90);
         setServoTilt(data.servo_tilt ?? 45);
-        setWarningRemaining(data.warning_remaining ?? 0);
         setDirectionDelta(data.direction_delta ?? null);
-        setOccludedCats((data.occluded_cats || []).map((c: any) => ({ id: c.id, predicted: c.predicted, occluded_by: c.occluded_by })));
         setFiredState(!!data.fired);
         onFrameData?.(data);
         if (data.fired && data.fire_target) {
@@ -276,33 +217,25 @@ export default function LiveFeed({
       return;
     }
 
-    // Gizmo interaction
-    if (showGizmo && onTransformChange && e.button === 0) {
+    // Left-click in edit mode: click on a zone to select it and start
+    // dragging immediately. Uses the same drag state as right-click drag
+    // so both paths share the same real-time move rendering.
+    if (!drawMode && onZonePolygonUpdate && !pendingPolygon && e.button === 0) {
       const pos = getNormPos(e);
       if (!pos) return;
-      const handle = hitTestGizmo(pos.x, pos.y);
-      if (handle !== "none") {
+      const hitId = hitTestZone(pos.x, pos.y);
+      if (hitId) {
         e.preventDefault();
-        setActiveHandle(handle);
-        setDragStartNorm(pos);
-        setDragStartTransform({ ...transform });
+        if (onSelectZone) onSelectZone(hitId);
+        setRightDragZoneId(hitId);
+        setRightDragStart(pos);
+        const zone = zones.find((z) => z.id === hitId);
+        if (zone) setRightDragOrigPoly([...zone.polygon]);
         return;
       }
-      if (pendingPolygon) return; // don't deselect while configuring new zone
-    }
-
-    // Click zone to select (in edit mode)
-    if (!drawMode && !selectedZoneId && onSelectZone && !pendingPolygon && e.button === 0) {
-      const pos = getNormPos(e);
-      if (!pos) return;
-      for (const zone of zones) {
-        if (!zone.enabled) continue;
-        const normPoly = zone.polygon.map(([pan, tilt]) => angleToPixelNorm(pan, tilt));
-        if (pointInPoly(pos.x, pos.y, normPoly)) {
-          onSelectZone(zone.id);
-          return;
-        }
-      }
+      // Clicked empty space — deselect
+      if (onSelectZone && selectedZoneId) onSelectZone(null);
+      return;
     }
 
     // Drawing
@@ -343,46 +276,6 @@ export default function LiveFeed({
       return;
     }
 
-    // Gizmo drag
-    if (activeHandle !== "none" && dragStartNorm && dragStartTransform && onTransformChange) {
-      const pos = getNormPos(e);
-      if (!pos) return;
-      const dx = pos.x - dragStartNorm.x;
-      const dy = pos.y - dragStartNorm.y;
-      const t = { ...dragStartTransform };
-      const SCALE_SENS = 4.0;
-      const SKEW_SENS = 3.0;
-      const HEIGHT_SENS = 600;
-
-      switch (activeHandle) {
-        case "x-axis": t.scaleX = Math.max(0.1, dragStartTransform.scaleX + dx * SCALE_SENS); break;
-        case "y-axis": t.scaleY = Math.max(0.1, dragStartTransform.scaleY + dy * SCALE_SENS); break;
-        case "z-axis": {
-          const proj = dx * Z_UNIT.x + dy * Z_UNIT.y;
-          t.height = Math.max(0, dragStartTransform.height - proj * HEIGHT_SENS);
-          break;
-        }
-        case "move": {
-          if (targetPolygon && onZonePolygonUpdate && selectedZoneId) {
-            const dPan = dx * FOV_H;
-            const dTilt = dy * FOV_V;
-            const newPoly = targetPolygon.map(([pan, tilt]) => [pan + dPan, tilt + dTilt]);
-            const zone = zones.find((z) => z.id === selectedZoneId);
-            if (zone) zone.polygon = newPoly;
-          }
-          setDragStartNorm(pos);
-          return;
-        }
-        case "skew-top": case "skew-bottom": t.skewX = dragStartTransform.skewX + dx * SKEW_SENS; break;
-        case "skew-left": case "skew-right": t.skewY = dragStartTransform.skewY + dy * SKEW_SENS; break;
-        case "slant":
-          t.slantX = Math.max(-1, Math.min(1, dragStartTransform.slantX + dx * 3));
-          t.slantY = Math.max(-1, Math.min(1, dragStartTransform.slantY + dy * 3));
-          break;
-      }
-      onTransformChange(t);
-      return;
-    }
 
     // Drawing
     if (!drawMode) return;
@@ -406,133 +299,17 @@ export default function LiveFeed({
       return;
     }
 
-    // Commit gizmo drag
-    if (activeHandle !== "none") {
-      if (activeHandle === "move" && selectedZoneId && onZonePolygonUpdate) {
-        const zone = zones.find((z) => z.id === selectedZoneId);
-        if (zone) onZonePolygonUpdate(selectedZoneId, zone.polygon);
-      }
-      setActiveHandle("none"); setDragStartNorm(null); setDragStartTransform(null);
-      return;
-    }
 
     // Freehand completion (line mode completes on click near first vertex)
     if (!drawMode || !isDrawing || drawTool === "line") return;
     setIsDrawing(false);
     if (drawPoints.length > 2 && onDrawComplete) {
-      const closed = [...drawPoints, drawPoints[0]];
+      const simplified = simplifyPoly(drawPoints, 0.005);
+      const closed = [...simplified, simplified[0]];
       const anglePolygon = closed.map(([px, py]) => pixelNormToAngle(px, py));
       onDrawComplete(anglePolygon);
       setDrawPoints([]);
     }
-  }
-
-  // ── Draw gizmo on canvas ────────────────────────
-  function drawGizmoOnCanvas(
-    ctx: CanvasRenderingContext2D,
-    basePixels: { x: number; y: number }[],
-    w: number, h: number,
-  ) {
-    let cx = 0, cy = 0;
-    basePixels.forEach((p) => { cx += p.x; cy += p.y; });
-    cx /= basePixels.length; cy /= basePixels.length;
-    const len = ARROW_LEN;
-
-    function drawArrow(fx: number, fy: number, tx: number, ty: number, color: string, label: string, active: boolean) {
-      const ddx = tx - fx, ddy = ty - fy;
-      const mag = Math.sqrt(ddx * ddx + ddy * ddy);
-      const ux = ddx / mag, uy = ddy / mag;
-      ctx.strokeStyle = color; ctx.lineWidth = active ? 3 : 2; ctx.setLineDash([]);
-      ctx.beginPath(); ctx.moveTo(fx, fy); ctx.lineTo(tx, ty); ctx.stroke();
-      // Head
-      ctx.fillStyle = color; ctx.beginPath(); ctx.moveTo(tx, ty);
-      ctx.lineTo(tx - ux * 8 + uy * 4, ty - uy * 8 - ux * 4);
-      ctx.lineTo(tx - ux * 8 - uy * 4, ty - uy * 8 + ux * 4);
-      ctx.closePath(); ctx.fill();
-      // Handle
-      const hs = active ? HANDLE_SIZE + 2 : HANDLE_SIZE;
-      ctx.fillStyle = active ? "white" : color;
-      ctx.strokeStyle = "rgba(255,255,255,0.8)"; ctx.lineWidth = 1;
-      ctx.fillRect(tx - hs / 2, ty - hs / 2, hs, hs);
-      ctx.strokeRect(tx - hs / 2, ty - hs / 2, hs, hs);
-      // Label
-      ctx.fillStyle = color; ctx.font = "bold 9px 'IBM Plex Mono', monospace";
-      ctx.fillText(label, tx + 6, ty + 3);
-    }
-
-    // Center dot
-    ctx.fillStyle = "rgba(255,255,255,0.9)";
-    ctx.beginPath(); ctx.arc(cx, cy, 4, 0, Math.PI * 2); ctx.fill();
-    ctx.strokeStyle = "rgba(0,0,0,0.4)"; ctx.lineWidth = 1; ctx.stroke();
-
-    const ah = activeHandleRef.current;
-    drawArrow(cx, cy, cx + len, cy, "rgba(239,68,68,0.9)", "W", ah === "x-axis");
-    drawArrow(cx, cy, cx, cy + len, "rgba(34,197,94,0.9)", "L", ah === "y-axis");
-    drawArrow(cx, cy, cx + Z_UNIT.x * len, cy + Z_UNIT.y * len, "rgba(59,130,246,0.9)", "H", ah === "z-axis");
-
-    // Skew handles
-    for (let i = 0; i < basePixels.length && i < 4; i++) {
-      const ni = (i + 1) % basePixels.length;
-      const mx = (basePixels[i].x + basePixels[ni].x) / 2;
-      const my = (basePixels[i].y + basePixels[ni].y) / 2;
-      const isActive = (i === 0 && ah === "skew-top") || (i === 1 && ah === "skew-right")
-        || (i === 2 && ah === "skew-bottom") || (i === 3 && ah === "skew-left");
-      const s = isActive ? SKEW_HANDLE_SIZE + 2 : SKEW_HANDLE_SIZE;
-      ctx.fillStyle = isActive ? "white" : "rgba(245,158,11,0.8)";
-      ctx.strokeStyle = "rgba(255,255,255,0.7)"; ctx.lineWidth = 1;
-      ctx.beginPath(); ctx.moveTo(mx, my - s); ctx.lineTo(mx + s, my);
-      ctx.lineTo(mx, my + s); ctx.lineTo(mx - s, my); ctx.closePath();
-      ctx.fill(); ctx.stroke();
-    }
-
-    // Readout
-    const t = transformRef.current;
-    ctx.fillStyle = "rgba(255,255,255,0.8)";
-    ctx.font = "500 9px 'IBM Plex Mono', monospace";
-    ctx.fillText(`W:${t.scaleX.toFixed(1)}x  L:${t.scaleY.toFixed(1)}x  H:${t.height.toFixed(0)}cm`, cx - 60, cy - 14);
-  }
-
-  // ── Draw 3D prism ───────────────────────────────
-  function drawPrism(
-    ctx: CanvasRenderingContext2D,
-    basePx: { x: number; y: number }[],
-    hMin: number, hMax: number, w: number, h: number,
-    slantX = 0, slantY = 0,
-  ) {
-    if (hMax <= hMin) return basePx;
-    const heightNorm = (hMax - hMin) / 300;
-    const offY = -heightNorm * h * 0.12;
-    const offX = heightNorm * w * 0.015;
-
-    let bcx = 0, bcy = 0;
-    basePx.forEach((p) => { bcx += p.x; bcy += p.y; });
-    bcx /= basePx.length; bcy /= basePx.length;
-
-    const topPx = basePx.map((p) => {
-      const relX = (p.x - bcx) / (w * 0.1 || 1);
-      const relY = (p.y - bcy) / (h * 0.1 || 1);
-      return { x: p.x + offX + slantX * relX * heightNorm * w * 0.02, y: p.y + offY + slantY * relY * heightNorm * h * 0.02 };
-    });
-
-    // Walls
-    for (let si = 0; si < basePx.length; si++) {
-      const ni = (si + 1) % basePx.length;
-      ctx.beginPath(); ctx.moveTo(basePx[si].x, basePx[si].y);
-      ctx.lineTo(topPx[si].x, topPx[si].y); ctx.lineTo(topPx[ni].x, topPx[ni].y);
-      ctx.lineTo(basePx[ni].x, basePx[ni].y); ctx.closePath();
-      ctx.fillStyle = "rgba(168,85,247,0.06)"; ctx.fill();
-      ctx.strokeStyle = "rgba(245,158,11,0.3)"; ctx.lineWidth = 1; ctx.setLineDash([4, 3]); ctx.stroke();
-    }
-    // Base
-    ctx.beginPath(); basePx.forEach((p, i) => { if (i === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y); }); ctx.closePath();
-    ctx.fillStyle = "rgba(245,158,11,0.12)"; ctx.fill();
-    ctx.strokeStyle = "rgba(245,158,11,0.5)"; ctx.lineWidth = 1.5; ctx.setLineDash([5, 3]); ctx.stroke();
-    // Top
-    ctx.beginPath(); topPx.forEach((p, i) => { if (i === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y); }); ctx.closePath();
-    ctx.fillStyle = "rgba(168,85,247,0.15)"; ctx.fill();
-    ctx.strokeStyle = "rgba(168,85,247,0.5)"; ctx.lineWidth = 1.5; ctx.setLineDash([]); ctx.stroke();
-    ctx.setLineDash([]);
-    return topPx;
   }
 
   // ── Main draw function ──────────────────────────
@@ -552,13 +329,11 @@ export default function LiveFeed({
     // Read current values from refs so we always draw the latest state
     const currentZones = zonesRef.current;
     const currentSelectedId = selectedZoneIdRef.current;
-    const currentTransform = transformRef.current;
     const currentRightDrag = rightDragZoneIdRef.current;
 
     // ── Draw zones ──
     for (const zone of currentZones) {
       if (!zone.enabled) continue;
-      if (zone.id === currentSelectedId) continue; // drawn separately with gizmo
 
       const projected = zone.polygon.map(([pan, tilt]) => ({
         px: 0.5 + (pan - sPan) / FOV_H, py: 0.5 + (tilt - sTilt) / FOV_V,
@@ -566,63 +341,37 @@ export default function LiveFeed({
       if (!projected.some((p) => p.px >= -0.5 && p.px <= 1.5 && p.py >= -0.5 && p.py <= 1.5)) continue;
 
       const isDragging = zone.id === currentRightDrag;
-      const is3d = zone.mode && zone.mode !== "2d";
+      const isSelected = zone.id === currentSelectedId;
       const basePx = projected.map((p) => ({ x: p.px * w, y: p.py * h }));
 
-      if (is3d && zone.height_max > zone.height_min) {
-        drawPrism(ctx, basePx, zone.height_min, zone.height_max, w, h);
-        if (isDragging) {
-          ctx.strokeStyle = "rgba(34,211,238,0.8)"; ctx.lineWidth = 2; ctx.setLineDash([]);
-          ctx.beginPath(); basePx.forEach((p, i) => { if (i === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y); }); ctx.closePath(); ctx.stroke();
-        }
-        if (basePx.length > 0) {
-          ctx.fillStyle = isDragging ? "rgba(34,211,238,0.9)" : "rgba(168,85,247,0.9)";
-          ctx.font = "500 10px 'IBM Plex Mono', monospace";
-          ctx.fillText(`${zone.name} [${zone.height_min}-${zone.height_max}cm]`, basePx[0].x, basePx[0].y - 20);
-        }
-      } else {
-        ctx.strokeStyle = isDragging ? "rgba(34,211,238,0.9)" : "rgba(239,68,68,0.7)";
-        ctx.lineWidth = isDragging ? 2.5 : 1.5;
-        ctx.setLineDash(isDragging ? [] : [6, 4]);
-        ctx.beginPath(); basePx.forEach((p, i) => { if (i === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y); }); ctx.closePath();
-        ctx.stroke();
-        ctx.fillStyle = isDragging ? "rgba(34,211,238,0.1)" : "rgba(239,68,68,0.06)";
-        ctx.fill(); ctx.setLineDash([]);
-        if (basePx.length > 0) {
-          ctx.fillStyle = isDragging ? "rgba(34,211,238,0.9)" : "rgba(239,68,68,0.9)";
-          ctx.font = "500 11px 'IBM Plex Mono', monospace";
-          ctx.fillText(zone.name, basePx[0].x, basePx[0].y - 6);
-        }
+      ctx.strokeStyle = (isDragging || isSelected) ? "rgba(34,211,238,0.9)" : "rgba(239,68,68,0.7)";
+      ctx.lineWidth = (isDragging || isSelected) ? 2.5 : 1.5;
+      ctx.setLineDash((isDragging || isSelected) ? [] : [6, 4]);
+      ctx.beginPath(); basePx.forEach((p, i) => { if (i === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y); }); ctx.closePath();
+      ctx.stroke();
+      ctx.fillStyle = (isDragging || isSelected) ? "rgba(34,211,238,0.1)" : "rgba(239,68,68,0.06)";
+      ctx.fill(); ctx.setLineDash([]);
+      if (basePx.length > 0) {
+        ctx.fillStyle = (isDragging || isSelected) ? "rgba(34,211,238,0.9)" : "rgba(239,68,68,0.9)";
+        ctx.font = "500 11px 'IBM Plex Mono', monospace";
+        ctx.fillText(zone.name, basePx[0].x, basePx[0].y - 6);
       }
     }
 
-    // ── Draw gizmo target polygon (selected zone or pending) ──
-    const transformedPoly = getTransformedPolyFromRefs();
-    if (transformedPoly && transformedPoly.length >= 3) {
-      const projected = transformedPoly.map(([pan, tilt]) => ({
+    // ── Draw pending polygon (newly drawn, not yet saved) ──
+    const pp = pendingPolygonRef.current;
+    if (pp && pp.length >= 3) {
+      const projected = pp.map(([pan, tilt]) => ({
         x: (0.5 + (pan - sPan) / FOV_H) * w,
         y: (0.5 + (tilt - sTilt) / FOV_V) * h,
       }));
-
-      if (currentTransform.height > 0) {
-        const topPx = drawPrism(ctx, projected, 0, currentTransform.height, w, h, currentTransform.slantX, currentTransform.slantY);
-        if (topPx.length > 0) {
-          ctx.fillStyle = "rgba(34,211,238,0.9)"; ctx.font = "600 10px 'IBM Plex Mono', monospace";
-          const label = currentSelectedId ? currentZones.find((z) => z.id === currentSelectedId)?.name || "ZONE" : "NEW ZONE";
-          ctx.fillText(`${label} [${currentTransform.height.toFixed(0)}cm]`, topPx[0].x, topPx[0].y - 4);
-        }
-      } else {
-        ctx.strokeStyle = "rgba(34,211,238,0.9)"; ctx.lineWidth = 2; ctx.setLineDash([]);
-        ctx.beginPath(); projected.forEach((p, i) => { if (i === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y); }); ctx.closePath();
-        ctx.stroke(); ctx.fillStyle = "rgba(34,211,238,0.12)"; ctx.fill();
-        if (projected.length > 0) {
-          ctx.fillStyle = "rgba(34,211,238,0.9)"; ctx.font = "600 10px 'IBM Plex Mono', monospace";
-          const label = currentSelectedId ? currentZones.find((z) => z.id === currentSelectedId)?.name || "ZONE" : "NEW ZONE";
-          ctx.fillText(label, projected[0].x, projected[0].y - 4);
-        }
+      ctx.strokeStyle = "rgba(245,158,11,0.9)"; ctx.lineWidth = 2; ctx.setLineDash([]);
+      ctx.beginPath(); projected.forEach((p, i) => { if (i === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y); }); ctx.closePath();
+      ctx.stroke(); ctx.fillStyle = "rgba(245,158,11,0.12)"; ctx.fill();
+      if (projected.length > 0) {
+        ctx.fillStyle = "rgba(245,158,11,0.9)"; ctx.font = "600 10px 'IBM Plex Mono', monospace";
+        ctx.fillText("NEW ZONE", projected[0].x, projected[0].y - 4);
       }
-      // Gizmo
-      drawGizmoOnCanvas(ctx, projected, w, h);
     }
 
     // ── Detections ──
@@ -701,12 +450,14 @@ export default function LiveFeed({
 
   // ── Cursor ──────────────────────────────────────
   let cursor = "default";
-  if (rightDragZoneId || activeHandle !== "none") cursor = "grabbing";
+  if (rightDragZoneId) cursor = "grabbing";
   else if (drawMode) cursor = (isDrawing && drawTool === "freehand") ? "none" : "crosshair";
-  else if (showGizmo) cursor = "default";
 
+  // Use a 4:3 viewBox so the SVG content area matches the canvas's
+  // objectFit: contain letterboxing. xMidYMid meet centers the SVG
+  // content identically to how the canvas centers its bitmap.
   const drawPathData = drawMode && drawPoints.length > 1
-    ? `M ${drawPoints.map(([x, y]) => `${x * 100},${y * 100}`).join(" L ")}${!isDrawing && drawPoints.length > 2 ? " Z" : ""}`
+    ? `M ${drawPoints.map(([x, y]) => `${x * 400},${y * 300}`).join(" L ")}${!isDrawing && drawPoints.length > 2 ? " Z" : ""}`
     : "";
 
   return (
@@ -717,7 +468,6 @@ export default function LiveFeed({
       onMouseUp={handleMouseUp}
       onMouseLeave={() => {
         if (isDrawing) handleMouseUp();
-        if (activeHandle !== "none") handleMouseUp();
         if (rightDragZoneId) handleMouseUp();
       }}
       onContextMenu={(e) => e.preventDefault()}
@@ -727,7 +477,7 @@ export default function LiveFeed({
         height: "100%",
         background: "var(--bg-deep)",
         cursor,
-        userSelect: (drawMode || showGizmo || rightDragZoneId) ? "none" : "auto",
+        userSelect: (drawMode || rightDragZoneId) ? "none" : "auto",
       }}
     >
       <canvas
@@ -738,7 +488,7 @@ export default function LiveFeed({
       {/* Drawing overlay SVG */}
       {drawMode && drawPathData && (
         <svg style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", pointerEvents: "none" }}
-          viewBox="0 0 100 100" preserveAspectRatio="none">
+          viewBox="0 0 400 300" preserveAspectRatio="xMidYMid meet">
           <path d={drawPathData} fill={isDrawing ? "none" : "rgba(245,158,11,0.15)"}
             stroke="var(--amber)" strokeWidth="0.4" strokeLinejoin="round" strokeLinecap="round" />
         </svg>
@@ -775,17 +525,6 @@ export default function LiveFeed({
         </div>
       )}
 
-      {/* Gizmo active banner */}
-      {showGizmo && !drawMode && (
-        <div style={{
-          position: "absolute", top: 10, left: "50%", transform: "translateX(-50%)",
-          padding: "4px 14px", background: "rgba(34,211,238,0.85)", color: "var(--bg-deep)",
-          borderRadius: "var(--radius-sm)", fontFamily: "var(--font-mono)", fontSize: 11,
-          fontWeight: 600, pointerEvents: "none", letterSpacing: "0.04em",
-        }}>
-          TRANSFORM — drag W/L/H arrows
-        </div>
-      )}
 
       <DirectionArrow delta={directionDelta} />
 
@@ -813,7 +552,7 @@ export default function LiveFeed({
       {!drawMode && detections.map((det, i) => {
         const conf = det.cat_confidence ?? 0;
         if (conf < 0.3 || conf >= 0.6) return null;
-        const [x1, y1, x2, y2] = det.bbox;
+        const [x1, , x2, y2] = det.bbox;
         const cx = ((x1 + x2) / 2) * 100;
         const cy = (y2) * 100;
         return (
@@ -834,9 +573,9 @@ export default function LiveFeed({
       })}
 
       {/* Top-left: state badge */}
-      {!drawMode && !showGizmo && (
+      {!drawMode && (
         <div style={{ position: "absolute", top: 10, left: 10, display: "flex", alignItems: "center", gap: 8 }}>
-          <StateIndicator state={state} warningRemaining={warningRemaining} />
+          <StateIndicator state={state} />
         </div>
       )}
 
@@ -877,25 +616,11 @@ export default function LiveFeed({
       {!drawMode && (
         <RadarHUD
           detections={detections}
-          occludedCats={occludedCats}
           servoPan={servoPan}
           servoTilt={servoTilt}
         />
       )}
 
-      {/* Occluded cat indicators — shifted above radar */}
-      {!drawMode && occludedCats.length > 0 && (
-        <div style={{ position: "absolute", bottom: 140, left: 10, display: "flex", flexDirection: "column", gap: 3 }}>
-          {occludedCats.map((c) => (
-            <div key={c.id} style={{
-              padding: "2px 8px", background: "rgba(245,158,11,0.15)", border: "1px dashed var(--amber-dim)",
-              borderRadius: 4, fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--amber)", animation: "pulse 2s infinite",
-            }}>
-              {c.id} — behind {c.occluded_by}
-            </div>
-          ))}
-        </div>
-      )}
     </div>
   );
 }

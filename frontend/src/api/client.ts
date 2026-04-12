@@ -1,4 +1,11 @@
-import type { Zone, Cat, CatEvent, ControlStatus } from "../types";
+import type {
+  Zone, Furniture, Cat, CatEvent, ControlStatus,
+  CalibrationStartResponse, CalibrationJogResponse, CalibrationSetHomeResponse,
+  BeginExtentResponse, RecordExtentCornerResponse, ComputeTileGridResponse,
+  ExtentCornerLabel,
+  VerificationTargetResponse, VerificationConfirmResponse,
+  RigSettings, JogDirection, JogStep,
+} from "../types";
 
 const API_BASE = "/api";
 
@@ -20,14 +27,15 @@ export const createZone = (zone: {
   name: string;
   polygon: number[][];
   overlap_threshold?: number;
-  cooldown_seconds?: number;
-  mode?: string;
-  room_polygon?: number[][];
-  height_min?: number;
-  height_max?: number;
+  enabled?: boolean;
 }) => fetchJSON<Zone>("/zones", { method: "POST", body: JSON.stringify(zone) });
 
-export const updateZone = (id: string, updates: Partial<Zone>) =>
+export const updateZone = (id: string, updates: {
+  name?: string;
+  polygon?: number[][];
+  overlap_threshold?: number;
+  enabled?: boolean;
+}) =>
   fetchJSON<Zone>(`/zones/${id}`, {
     method: "PUT",
     body: JSON.stringify(updates),
@@ -141,39 +149,99 @@ export const emergencyStop = () =>
 export const clearEmergencyStop = () =>
   fetchJSON<{ stopped: boolean; armed: boolean }>("/control/clear-estop", { method: "POST" });
 
-// Spatial / Calibration
-export const getFurniture = () => fetchJSON<any[]>("/spatial/furniture");
+// Furniture
+export const getFurniture = () => fetchJSON<Furniture[]>("/furniture");
 
-export const createFurniture = (furniture: {
-  name: string;
-  base_polygon: number[][];
-  height_min: number;
-  height_max: number;
-}) => fetchJSON("/spatial/furniture", { method: "POST", body: JSON.stringify(furniture) });
-
-export const updateFurniture = (id: string, updates: {
-  name?: string;
-  base_polygon?: number[][];
-  height_min?: number;
-  height_max?: number;
-}) => fetchJSON(`/spatial/furniture/${id}`, { method: "PUT", body: JSON.stringify(updates) });
+export const createFurniture = (name: string, polygon: number[][]) =>
+  fetchJSON<Furniture>("/furniture", { method: "POST", body: JSON.stringify({ name, polygon }) });
 
 export const deleteFurniture = (id: string) =>
-  fetchJSON(`/spatial/furniture/${id}`, { method: "DELETE" });
+  fetchJSON(`/furniture/${id}`, { method: "DELETE" });
 
-export const estimateHeight = (polygon: number[][]) =>
-  fetchJSON<{ height_min: number; height_max: number; estimated: boolean; reason?: string }>(
-    "/spatial/estimate-height", { method: "POST", body: JSON.stringify({ polygon }) }
-  );
+// ── Aim Calibration (9-point pixel→servo) ──
 
-export const getRoomModelStatus = () =>
-  fetchJSON<{ initialized: boolean; width_cm?: number; depth_cm?: number; furniture_count?: number; depth_scale?: number }>("/spatial/room-model/status");
+export const startAimCalibration = () =>
+  fetchJSON<CalibrationStartResponse>("/calibration/start", { method: "POST" });
 
-export const calibrateDepthScale = (realDistanceCm: number) =>
-  fetchJSON("/spatial/calibrate-scale", {
+export const jogCalibration = (direction: JogDirection, step: JogStep = "coarse") =>
+  fetchJSON<CalibrationJogResponse>("/calibration/jog", {
     method: "POST",
-    body: JSON.stringify({ real_distance_cm: realDistanceCm }),
+    body: JSON.stringify({ direction, step }),
   });
+
+export const setAimCalibrationHome = () =>
+  fetchJSON<CalibrationSetHomeResponse>("/calibration/set-home", { method: "POST" });
+
+export const beginExtentCapture = () =>
+  fetchJSON<BeginExtentResponse>("/calibration/begin-extent", { method: "POST" });
+
+export const recordExtentCorner = (label: ExtentCornerLabel) =>
+  fetchJSON<RecordExtentCornerResponse>("/calibration/record-extent-corner", {
+    method: "POST",
+    body: JSON.stringify({ label }),
+  });
+
+export const computeTileGrid = () =>
+  fetchJSON<ComputeTileGridResponse>("/calibration/compute-tile-grid", {
+    method: "POST",
+  });
+
+export const startVerification = () =>
+  fetchJSON<VerificationTargetResponse>("/calibration/start-verification", {
+    method: "POST",
+  });
+
+export const confirmVerification = () =>
+  fetchJSON<VerificationConfirmResponse>("/calibration/confirm-verification", {
+    method: "POST",
+  });
+
+export const skipVerification = () =>
+  fetchJSON<{ phase: string }>("/calibration/skip-verification", { method: "POST" });
+
+export const finalizeAimCalibration = () =>
+  fetchJSON<{ status: string }>("/calibration/finalize", { method: "POST" });
+
+export const cancelAimCalibration = () =>
+  fetchJSON<{ cancelled: boolean }>("/calibration/cancel", { method: "POST" });
+
+export const getAimCalibrationStatus = () =>
+  fetchJSON<any>("/calibration/status");
+
+export const deleteAimCalibration = () =>
+  fetchJSON<{ deleted: boolean }>("/calibration", { method: "DELETE" });
+
+export const getRigSettings = () =>
+  fetchJSON<RigSettings>("/calibration/rig-settings");
+
+export const updateRigSettings = (updates: Partial<RigSettings>) =>
+  fetchJSON<RigSettings>("/calibration/rig-settings", {
+    method: "POST",
+    body: JSON.stringify(updates),
+  });
+
+export const autoLevelPanAxis = (points: { pan: number; tilt: number }[]) =>
+  fetchJSON<{
+    pan_tilt_poly: number[];
+    home_pan: number;
+    home_tilt: number;
+    num_points: number;
+    per_point_residuals: number[];
+    max_residual: number;
+    rms_residual: number;
+    rig_settings: RigSettings;
+  }>("/calibration/auto-level", {
+    method: "POST",
+    body: JSON.stringify({ points }),
+  });
+
+export const testLevelSweep = () =>
+  fetchJSON<{
+    status: string;
+    span: number;
+    home_pan: number;
+    home_tilt: number;
+  }>("/calibration/test-level-sweep", { method: "POST" });
 
 // WebSocket
 export function connectEventSocket(

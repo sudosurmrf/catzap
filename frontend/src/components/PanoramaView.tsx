@@ -18,9 +18,6 @@ interface PanoramaViewProps {
   drawMode?: boolean;
   onDrawComplete?: (anglePolygon: number[][]) => void;
   pendingPolygon?: number[][] | null;
-  pendingMode?: string;
-  pendingHeightMin?: number;
-  pendingHeightMax?: number;
   selectedZoneId?: string | null;
   onSelectZone?: (id: string | null) => void;
   onZonePolygonUpdate?: (zoneId: string, newPolygon: number[][]) => void;
@@ -37,22 +34,15 @@ type GizmoHandle =
   | "move"       // drag inside polygon
   | "x-axis"     // red: width scale
   | "y-axis"     // green: length scale
-  | "z-axis"     // blue: height extrude
   | "skew-top"   // skew from top edge midpoint
   | "skew-right" // skew from right edge midpoint
   | "skew-bottom"
-  | "skew-left"
-  | "slant";     // drag top face for slant
+  | "skew-left";
 
 // Gizmo arrow length in pixels
 const ARROW_LEN = 50;
 const HANDLE_SIZE = 7;
 const SKEW_HANDLE_SIZE = 5;
-
-// Isometric "up" direction for Z axis (matches existing prism offset direction)
-const Z_DIR = { x: 0.15, y: -1.0 };
-const Z_LEN = Math.sqrt(Z_DIR.x ** 2 + Z_DIR.y ** 2);
-const Z_UNIT = { x: Z_DIR.x / Z_LEN, y: Z_DIR.y / Z_LEN };
 
 export default function PanoramaView({
   panoramaBase64, zones, detections,
@@ -60,8 +50,7 @@ export default function PanoramaView({
   sweepPanMin, sweepPanMax, sweepTiltMin, sweepTiltMax,
   fovH, fovV,
   onClickAngle, drawMode, onDrawComplete,
-  pendingPolygon, pendingMode,
-  pendingHeightMin = 0, pendingHeightMax = 0,
+  pendingPolygon,
   selectedZoneId, onSelectZone, onZonePolygonUpdate,
   transform = { ...DEFAULT_TRANSFORM },
   onTransformChange,
@@ -108,7 +97,7 @@ export default function PanoramaView({
   useEffect(() => {
     if (panoramaImgRef.current) drawPanorama(panoramaImgRef.current);
   }, [zones, detections, servoPan, servoTilt,
-      pendingPolygon, pendingMode, pendingHeightMin, pendingHeightMax,
+      pendingPolygon,
       selectedZoneId, transform, originalPolygon, linePoints, linePreview,
       rawPoints, activeHandle, isDrawing]);
 
@@ -206,7 +195,6 @@ export default function PanoramaView({
       center: { x: cx, y: cy },
       xEnd: { x: cx + arrowScale, y: cy },                         // red: right
       yEnd: { x: cx, y: cy + arrowScale },                         // green: down
-      zEnd: { x: cx + Z_UNIT.x * arrowScale, y: cy + Z_UNIT.y * arrowScale }, // blue: up-ish
       normPoly,
       // Edge midpoints for skew handles
       edgeMids: normPoly.map(([x, y], i) => {
@@ -221,8 +209,6 @@ export default function PanoramaView({
     if (!g) return "none";
     const HIT_R = 0.02;
 
-    // Z axis handle (priority — it overlaps with polygon)
-    if (distToPoint(nx, ny, g.zEnd.x, g.zEnd.y) < HIT_R) return "z-axis";
     // X axis handle
     if (distToPoint(nx, ny, g.xEnd.x, g.xEnd.y) < HIT_R) return "x-axis";
     // Y axis handle
@@ -368,7 +354,6 @@ export default function PanoramaView({
       // Scale factor: how much mouse movement maps to transform change
       const SCALE_SENS = 4.0;
       const SKEW_SENS = 3.0;
-      const HEIGHT_SENS = 600; // cm per normalized unit
 
       switch (activeHandle) {
         case "x-axis":
@@ -377,16 +362,7 @@ export default function PanoramaView({
         case "y-axis":
           t.scaleY = Math.max(0.1, dragStartTransform.scaleY + dy * SCALE_SENS);
           break;
-        case "z-axis": {
-          // Project mouse delta onto Z direction
-          const proj = dx * Z_UNIT.x + dy * Z_UNIT.y;
-          t.height = Math.max(0, dragStartTransform.height - proj * HEIGHT_SENS);
-          break;
-        }
         case "move": {
-          // Move is handled differently — we offset the originalPolygon
-          // Actually for move we'll just translate via transform isn't ideal.
-          // Instead, update the polygon directly
           if (targetPolygon && onZonePolygonUpdate && selectedZoneId) {
             const dPan = dx * (sweepPanMax - sweepPanMin);
             const dTilt = dy * (sweepTiltMax - sweepTiltMin);
@@ -408,10 +384,6 @@ export default function PanoramaView({
         case "skew-left":
         case "skew-right":
           t.skewY = dragStartTransform.skewY + dy * SKEW_SENS;
-          break;
-        case "slant":
-          t.slantX = Math.max(-1, Math.min(1, dragStartTransform.slantX + dx * 3));
-          t.slantY = Math.max(-1, Math.min(1, dragStartTransform.slantY + dy * 3));
           break;
       }
       onTransformChange(t);
@@ -469,81 +441,8 @@ export default function PanoramaView({
     }
   }
 
-  // ── Draw prism with slant support ───────────────
-  function drawPrism(
-    ctx: CanvasRenderingContext2D,
-    basePixels: { x: number; y: number }[],
-    hMin: number, hMax: number,
-    w: number, h: number,
-    slantX = 0, slantY = 0,
-  ) {
-    if (hMax <= hMin) return basePixels;
-    const heightNorm = (hMax - hMin) / 300;
-    const baseOffY = -heightNorm * h * 0.15;
-    const baseOffX = heightNorm * w * 0.02;
-
-    // Find base centroid for slant reference
-    let bcx = 0, bcy = 0;
-    basePixels.forEach((p) => { bcx += p.x; bcy += p.y; });
-    bcx /= basePixels.length; bcy /= basePixels.length;
-
-    const topPixels = basePixels.map((p) => {
-      // Slant: offset varies by position relative to centroid
-      const relX = (p.x - bcx) / (w * 0.1 || 1);
-      const relY = (p.y - bcy) / (h * 0.1 || 1);
-      const slantOffX = slantX * relX * heightNorm * w * 0.03;
-      const slantOffY = slantY * relY * heightNorm * h * 0.03;
-      return {
-        x: p.x + baseOffX + slantOffX,
-        y: p.y + baseOffY + slantOffY,
-      };
-    });
-
-    // Side walls
-    for (let i = 0; i < basePixels.length; i++) {
-      const ni = (i + 1) % basePixels.length;
-      ctx.beginPath();
-      ctx.moveTo(basePixels[i].x, basePixels[i].y);
-      ctx.lineTo(topPixels[i].x, topPixels[i].y);
-      ctx.lineTo(topPixels[ni].x, topPixels[ni].y);
-      ctx.lineTo(basePixels[ni].x, basePixels[ni].y);
-      ctx.closePath();
-      ctx.fillStyle = "rgba(168, 85, 247, 0.08)";
-      ctx.fill();
-      ctx.strokeStyle = "rgba(245, 158, 11, 0.4)";
-      ctx.lineWidth = 1;
-      ctx.setLineDash([4, 3]);
-      ctx.stroke();
-    }
-
-    // Base
-    ctx.beginPath();
-    basePixels.forEach((p, i) => { if (i === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y); });
-    ctx.closePath();
-    ctx.fillStyle = "rgba(245, 158, 11, 0.18)";
-    ctx.fill();
-    ctx.strokeStyle = "rgba(245, 158, 11, 0.6)";
-    ctx.lineWidth = 1.5;
-    ctx.setLineDash([5, 3]);
-    ctx.stroke();
-
-    // Top
-    ctx.beginPath();
-    topPixels.forEach((p, i) => { if (i === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y); });
-    ctx.closePath();
-    ctx.fillStyle = "rgba(168, 85, 247, 0.2)";
-    ctx.fill();
-    ctx.strokeStyle = "rgba(168, 85, 247, 0.6)";
-    ctx.lineWidth = 1.5;
-    ctx.setLineDash([]);
-    ctx.stroke();
-    ctx.setLineDash([]);
-
-    return topPixels;
-  }
-
   // ── Draw the transform gizmo ────────────────────
-  function drawGizmo(ctx: CanvasRenderingContext2D, basePixels: { x: number; y: number }[], w: number, h: number) {
+  function drawGizmo(ctx: CanvasRenderingContext2D, basePixels: { x: number; y: number }[], _w: number, _h: number) {
     // Centroid
     let cx = 0, cy = 0;
     basePixels.forEach((p) => { cx += p.x; cy += p.y; });
@@ -612,10 +511,6 @@ export default function PanoramaView({
     drawArrow(cx, cy, cx, cy + len,
       "rgba(34, 197, 94, 0.9)", "L", activeHandle === "y-axis");
 
-    // Z axis (blue) — isometric up
-    drawArrow(cx, cy, cx + Z_UNIT.x * len, cy + Z_UNIT.y * len,
-      "rgba(59, 130, 246, 0.9)", "H", activeHandle === "z-axis");
-
     // Skew handles at edge midpoints (diamonds)
     const normPoly = basePixels;
     for (let i = 0; i < normPoly.length && i < 4; i++) {
@@ -649,7 +544,6 @@ export default function PanoramaView({
     const readout = [
       `W:${transform.scaleX.toFixed(1)}x`,
       `L:${transform.scaleY.toFixed(1)}x`,
-      `H:${transform.height.toFixed(0)}cm`,
     ].join("  ");
     ctx.fillText(readout, cx - 60, cy - 14);
 
@@ -683,42 +577,22 @@ export default function PanoramaView({
       if (zone.id === selectedZoneId) continue;
 
       const isDragging = zone.id === rightDragZoneId;
-      const is3d = zone.mode && zone.mode !== "2d";
       const basePixels = zone.polygon.map(([pan, tilt]) => angleToPx(pan, tilt, w, h));
 
-      if (is3d && zone.height_max > zone.height_min) {
-        const topPixels = drawPrism(ctx, basePixels, zone.height_min, zone.height_max, w, h);
-        if (topPixels.length > 0) {
-          ctx.fillStyle = isDragging ? "rgba(34, 211, 238, 0.9)" : "rgba(168, 85, 247, 0.9)";
-          ctx.font = "500 10px 'IBM Plex Mono', monospace";
-          ctx.fillText(`${zone.name} [${zone.height_min}-${zone.height_max}cm]`, topPixels[0].x, topPixels[0].y - 4);
-        }
-        // Highlight border when mid-dragging
-        if (isDragging) {
-          ctx.strokeStyle = "rgba(34, 211, 238, 0.8)";
-          ctx.lineWidth = 2;
-          ctx.setLineDash([]);
-          ctx.beginPath();
-          basePixels.forEach((p, i) => { if (i === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y); });
-          ctx.closePath();
-          ctx.stroke();
-        }
-      } else {
-        ctx.strokeStyle = isDragging ? "rgba(34, 211, 238, 0.9)" : "rgba(239, 68, 68, 0.6)";
-        ctx.lineWidth = isDragging ? 2.5 : 1.5;
-        ctx.setLineDash(isDragging ? [] : [5, 3]);
-        ctx.beginPath();
-        basePixels.forEach((p, i) => { if (i === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y); });
-        ctx.closePath();
-        ctx.stroke();
-        ctx.fillStyle = isDragging ? "rgba(34, 211, 238, 0.12)" : "rgba(239, 68, 68, 0.08)";
-        ctx.fill();
-        ctx.setLineDash([]);
-        if (basePixels.length > 0) {
-          ctx.fillStyle = isDragging ? "rgba(34, 211, 238, 0.9)" : "rgba(239, 68, 68, 0.8)";
-          ctx.font = "500 10px 'IBM Plex Mono', monospace";
-          ctx.fillText(zone.name, basePixels[0].x, basePixels[0].y - 4);
-        }
+      ctx.strokeStyle = isDragging ? "rgba(34, 211, 238, 0.9)" : "rgba(239, 68, 68, 0.6)";
+      ctx.lineWidth = isDragging ? 2.5 : 1.5;
+      ctx.setLineDash(isDragging ? [] : [5, 3]);
+      ctx.beginPath();
+      basePixels.forEach((p, i) => { if (i === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y); });
+      ctx.closePath();
+      ctx.stroke();
+      ctx.fillStyle = isDragging ? "rgba(34, 211, 238, 0.12)" : "rgba(239, 68, 68, 0.08)";
+      ctx.fill();
+      ctx.setLineDash([]);
+      if (basePixels.length > 0) {
+        ctx.fillStyle = isDragging ? "rgba(34, 211, 238, 0.9)" : "rgba(239, 68, 68, 0.8)";
+        ctx.font = "500 10px 'IBM Plex Mono', monospace";
+        ctx.fillText(zone.name, basePixels[0].x, basePixels[0].y - 4);
       }
     }
 
@@ -727,36 +601,23 @@ export default function PanoramaView({
     if (transformedPoly && transformedPoly.length >= 3) {
       const basePx = transformedPoly.map(([pan, tilt]) => angleToPx(pan, tilt, w, h));
 
-      if (transform.height > 0) {
-        // Draw as 3D prism with slant
-        const topPx = drawPrism(ctx, basePx, 0, transform.height, w, h, transform.slantX, transform.slantY);
-        if (topPx.length > 0) {
-          ctx.fillStyle = "rgba(34, 211, 238, 0.9)";
-          ctx.font = "600 10px 'IBM Plex Mono', monospace";
-          const label = selectedZoneId
-            ? zones.find((z) => z.id === selectedZoneId)?.name || "ZONE"
-            : "NEW ZONE";
-          ctx.fillText(`${label} [${transform.height.toFixed(0)}cm]`, topPx[0].x, topPx[0].y - 4);
-        }
-      } else {
-        // 2D outline with cyan highlight
-        ctx.strokeStyle = "rgba(34, 211, 238, 0.9)";
-        ctx.lineWidth = 2;
-        ctx.setLineDash([]);
-        ctx.beginPath();
-        basePx.forEach((p, i) => { if (i === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y); });
-        ctx.closePath();
-        ctx.stroke();
-        ctx.fillStyle = "rgba(34, 211, 238, 0.12)";
-        ctx.fill();
-        if (basePx.length > 0) {
-          ctx.fillStyle = "rgba(34, 211, 238, 0.9)";
-          ctx.font = "600 10px 'IBM Plex Mono', monospace";
-          const label = selectedZoneId
-            ? zones.find((z) => z.id === selectedZoneId)?.name || "ZONE"
-            : "NEW ZONE";
-          ctx.fillText(label, basePx[0].x, basePx[0].y - 4);
-        }
+      // 2D outline with cyan highlight
+      ctx.strokeStyle = "rgba(34, 211, 238, 0.9)";
+      ctx.lineWidth = 2;
+      ctx.setLineDash([]);
+      ctx.beginPath();
+      basePx.forEach((p, i) => { if (i === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y); });
+      ctx.closePath();
+      ctx.stroke();
+      ctx.fillStyle = "rgba(34, 211, 238, 0.12)";
+      ctx.fill();
+      if (basePx.length > 0) {
+        ctx.fillStyle = "rgba(34, 211, 238, 0.9)";
+        ctx.font = "600 10px 'IBM Plex Mono', monospace";
+        const label = selectedZoneId
+          ? zones.find((z) => z.id === selectedZoneId)?.name || "ZONE"
+          : "NEW ZONE";
+        ctx.fillText(label, basePx[0].x, basePx[0].y - 4);
       }
 
       // Draw the transform gizmo

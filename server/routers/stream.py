@@ -14,7 +14,7 @@ router = APIRouter(tags=["stream"])
 
 _feed_clients: list[WebSocket] = []
 _event_clients: list[WebSocket] = []
-_latest_frame: dict | None = None  # {"frame": np.ndarray, "servo_pan": float, "servo_tilt": float}
+_latest_frame: dict | None = None  # {"frame": np.ndarray, "servo_pan": float, "servo_tilt": float}; queue also carries original jpg_bytes as (frame, jpg_bytes) tuples
 
 
 def store_latest_frame(frame, servo_pan: float, servo_tilt: float):
@@ -35,14 +35,17 @@ async def broadcast_to_clients(data: dict):
     """Broadcast frame data to feed WebSocket clients only."""
     if not _feed_clients:
         return
-    disconnected = []
-    for ws in _feed_clients:
+
+    async def _send(ws):
         try:
             await asyncio.wait_for(ws.send_json(data), timeout=0.5)
+            return None
         except Exception:
-            disconnected.append(ws)
-    for ws in disconnected:
-        if ws in _feed_clients:
+            return ws
+
+    results = await asyncio.gather(*[_send(ws) for ws in _feed_clients], return_exceptions=False)
+    for ws in results:
+        if ws is not None and ws in _feed_clients:
             _feed_clients.remove(ws)
 
 
@@ -71,7 +74,7 @@ class MJPEGStreamReader:
         self._sock: socket.socket | None = None
         self._connected = False
         self._stop = threading.Event()
-        self._frame_queue: asyncio.Queue = asyncio.Queue(maxsize=2)
+        self._frame_queue: asyncio.Queue = asyncio.Queue(maxsize=4)
         self._thread: threading.Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
 
@@ -161,12 +164,12 @@ class MJPEGStreamReader:
                             self._frame_queue.get_nowait()
                         except asyncio.QueueEmpty:
                             pass
-                    self._loop.call_soon_threadsafe(self._frame_queue.put_nowait, frame)
+                    self._loop.call_soon_threadsafe(self._frame_queue.put_nowait, (frame, jpg_bytes))
 
         self._connected = False
         logger.info("ESP32-CAM stream read loop ended")
 
-    async def read_frame(self) -> np.ndarray | None:
+    async def read_frame(self) -> tuple[np.ndarray, bytes] | None:
         if not self._connected:
             await asyncio.sleep(1)
             try:
@@ -174,7 +177,6 @@ class MJPEGStreamReader:
             except Exception as e:
                 logger.warning(f"Reconnect failed: {e}")
                 return None
-
         try:
             return await asyncio.wait_for(self._frame_queue.get(), timeout=5.0)
         except asyncio.TimeoutError:

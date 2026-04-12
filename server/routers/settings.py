@@ -14,7 +14,6 @@ class SettingUpdate(BaseModel):
 @router.get("")
 async def get_all_settings():
     keys = [
-        "cooldown_default",
         "confidence_threshold",
         "overlap_threshold",
         "arm_schedule",

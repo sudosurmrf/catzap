@@ -1,0 +1,13 @@
+{
+  "tilt_jog_inverted": false,
+  "pan_jog_inverted": true,
+  "pan_tilt_poly": [
+    -0.23273708364494827,
+    0.04426087370288507,
+    0.003006639656002466
+  ],
+  "pan_min": 29.0,
+  "pan_max": 159.0,
+  "tilt_min": 10.0,
+  "tilt_max": 61.0
+}

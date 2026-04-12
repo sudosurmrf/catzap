@@ -8,9 +8,10 @@ import CalibrationWizard from "./CalibrationWizard";
 
 interface SettingsProps {
   onUpdate: () => void;
+  onOpenAimCalibration?: () => void;
 }
 
-export default function Settings({ onUpdate }: SettingsProps) {
+export default function Settings({ onOpenAimCalibration }: SettingsProps) {
   const [cats, setCats] = useState<Cat[]>([]);
   const [newCatName, setNewCatName] = useState("");
   const [photoCounts, setPhotoCounts] = useState<Record<string, number>>({});
@@ -200,6 +201,29 @@ export default function Settings({ onUpdate }: SettingsProps) {
           </div>
         )}
       </div>
+
+      {/* Aim calibration launch — separate from the panorama/depth wizard */}
+      {onOpenAimCalibration && (
+        <div className="glass-panel-solid" style={{ padding: 14 }}>
+          <div className="label" style={{ marginBottom: 8 }}>Aim Calibration</div>
+          <p style={{
+            color: "var(--text-tertiary)", fontFamily: "var(--font-mono)",
+            fontSize: 11, lineHeight: 1.5, marginBottom: 10,
+          }}>
+            9-point pixel → servo calibration. Jog the gun to aim at each crosshair,
+            confirm, then verify across the panorama tiles. Replaces the analytic
+            FOV model with empirical data — fixes tracking accuracy and absorbs any
+            servo sign inversions automatically.
+          </p>
+          <button
+            className="btn btn-primary"
+            onClick={onOpenAimCalibration}
+            style={{ width: "100%" }}
+          >
+            Start Aim Calibration
+          </button>
+        </div>
+      )}
 
       <CalibrationWizard />
     </div>

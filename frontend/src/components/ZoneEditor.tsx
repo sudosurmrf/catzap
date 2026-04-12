@@ -1,7 +1,6 @@
 import { useRef, useState, useCallback } from "react";
 import type { Zone } from "../types";
-import { createZone, deleteZone, createFurniture } from "../api/client";
-import HeightSlider from "./HeightSlider";
+import { createZone, deleteZone } from "../api/client";
 
 interface SweepConfig {
   panMin: number;
@@ -62,57 +61,6 @@ function simplifyPoints(points: number[][], tolerance: number): number[][] {
   return rdp(points, 0, points.length - 1, tolerance);
 }
 
-const MODE_LABELS: Record<string, { label: string; desc: string; color: string }> = {
-  "2d": { label: "2D Flat", desc: "Standard flat zone — no height", color: "var(--text-tertiary)" },
-  "auto_3d": { label: "Auto 3D", desc: "Uses depth camera to estimate volume", color: "var(--cyan)" },
-  "manual_3d": { label: "Manual 3D", desc: "You set the height range manually", color: "var(--amber)" },
-};
-
-/** Render a 3D prism in SVG — base polygon with extruded walls */
-function Prism3D({ polygon, heightMin, heightMax, color, maxHeight = 300 }: {
-  polygon: number[][];
-  heightMin: number;
-  heightMax: number;
-  color: string;
-  maxHeight?: number;
-}) {
-  if (polygon.length < 3 || heightMax <= heightMin) return null;
-
-  // Scale: 1 unit of height = some visual offset in Y (going "up" = negative Y)
-  // and a small X offset for the oblique projection feel
-  const hScale = 0.15; // how much Y offset per unit of normalized height
-  const xSkew = 0.04;  // slight horizontal offset for depth illusion
-  const normalizedHeight = (heightMax - heightMin) / maxHeight;
-  const offsetY = -normalizedHeight * hScale;
-  const offsetX = normalizedHeight * xSkew;
-
-  const basePath = `M ${polygon.map(([x, y]) => `${x},${y}`).join(" L ")} Z`;
-  const topPolygon = polygon.map(([x, y]) => [x + offsetX, y + offsetY]);
-  const topPath = `M ${topPolygon.map(([x, y]) => `${x},${y}`).join(" L ")} Z`;
-
-  // Side walls — connect each base vertex to its top counterpart
-  const wallPaths = polygon.map(([bx, by], i) => {
-    const [tx, ty] = topPolygon[i];
-    const ni = (i + 1) % polygon.length;
-    const [bnx, bny] = polygon[ni];
-    const [tnx, tny] = topPolygon[ni];
-    return `M ${bx},${by} L ${tx},${ty} L ${tnx},${tny} L ${bnx},${bny} Z`;
-  });
-
-  return (
-    <g>
-      {/* Side walls */}
-      {wallPaths.map((d, i) => (
-        <path key={`wall-${i}`} d={d} fill="rgba(168, 85, 247, 0.08)" stroke={color} strokeWidth="0.002" strokeDasharray="0.006 0.004" />
-      ))}
-      {/* Base */}
-      <path d={basePath} fill="rgba(245, 158, 11, 0.18)" stroke={color} strokeWidth="0.003" strokeDasharray="0.01 0.005" />
-      {/* Top face */}
-      <path d={topPath} fill="rgba(168, 85, 247, 0.2)" stroke={color} strokeWidth="0.003" />
-    </g>
-  );
-}
-
 export default function ZoneEditor({
   zones, panoramaBase64, sweepConfig, onSave, onCancel,
   feedDrawnPolygon, onClearFeedDraw,
@@ -121,18 +69,13 @@ export default function ZoneEditor({
   const [rawPoints, setRawPoints] = useState<number[][]>([]);
   const [isDrawing, setIsDrawing] = useState(false);
   const [zoneName, setZoneName] = useState("");
-  const [zoneMode, setZoneMode] = useState<"2d" | "auto_3d" | "manual_3d">("2d");
-  const [heightMin, setHeightMin] = useState(0);
-  const [heightMax, setHeightMax] = useState(75);
   const [saving, setSaving] = useState(false);
-  const [drawSource, setDrawSource] = useState<"panorama" | "feed">("panorama");
+  const [, setDrawSource] = useState<"panorama" | "feed">("panorama");
 
   // If a polygon was drawn on the live feed, use it
   const hasFeedDraw = feedDrawnPolygon && feedDrawnPolygon.length >= 3;
   // For panorama draws, simplify raw points
   const panoPoints = rawPoints.length > 2 ? simplifyPoints(rawPoints, 0.005) : rawPoints;
-  // The active polygon (either from panorama or feed)
-  const activeAnglePolygon = hasFeedDraw ? feedDrawnPolygon! : null;
   const activePointCount = hasFeedDraw ? feedDrawnPolygon!.length : panoPoints.length;
 
   const normalizedToAngle = useCallback((nx: number, ny: number): number[] => {
@@ -192,7 +135,6 @@ export default function ZoneEditor({
     setSaving(true);
 
     const name = zoneName.trim();
-    const is3d = zoneMode !== "2d";
 
     // Get the angle-space polygon
     let anglePoints: number[][];
@@ -203,28 +145,13 @@ export default function ZoneEditor({
     }
 
     try {
-      if (is3d) {
-        await createFurniture({
-          name,
-          base_polygon: anglePoints,
-          height_min: heightMin,
-          height_max: heightMax,
-        });
-      }
-
       await createZone({
         name,
         polygon: anglePoints,
-        mode: zoneMode,
-        height_min: is3d ? heightMin : 0,
-        height_max: is3d ? heightMax : 0,
       });
 
       setRawPoints([]);
       setZoneName("");
-      setZoneMode("2d");
-      setHeightMin(0);
-      setHeightMax(75);
       if (onClearFeedDraw) onClearFeedDraw();
       onSave();
     } finally {
@@ -301,24 +228,10 @@ export default function ZoneEditor({
           viewBox="0 0 1 1"
           preserveAspectRatio="none"
         >
-          {/* Existing zones — with 3D prism rendering */}
+          {/* Existing zones — 2D polygon rendering */}
           {zones.map((zone) => {
             if (!zone.enabled) return null;
-            const is3dZone = zone.mode && zone.mode !== "2d";
             const zoneNormalized = zone.polygon.map(([pan, tilt]) => angleToNormalized(pan, tilt));
-
-            if (is3dZone && zone.height_max > zone.height_min) {
-              return (
-                <Prism3D
-                  key={zone.id}
-                  polygon={zoneNormalized}
-                  heightMin={zone.height_min}
-                  heightMax={zone.height_max}
-                  color="rgba(245, 158, 11, 0.6)"
-                />
-              );
-            }
-
             const d = zoneNormalized.length > 1
               ? `M ${zoneNormalized.map(([x, y]) => `${x},${y}`).join(" L ")} Z`
               : "";
@@ -334,43 +247,16 @@ export default function ZoneEditor({
             );
           })}
 
-          {/* Current drawing — with live 3D prism when height is set */}
+          {/* Current drawing */}
           {currentPathData && (
-            <>
-              {zoneMode !== "2d" && heightMax > heightMin ? (
-                (() => {
-                  const poly = hasFeedDraw
-                    ? feedDrawnPolygon!.map(([pan, tilt]) => angleToNormalized(pan, tilt))
-                    : (panoPoints.length >= 3 ? panoPoints : []);
-                  return poly.length >= 3 ? (
-                    <Prism3D
-                      polygon={poly}
-                      heightMin={heightMin}
-                      heightMax={heightMax}
-                      color="rgba(245, 158, 11, 0.8)"
-                    />
-                  ) : (
-                    <path
-                      d={currentPathData}
-                      fill="rgba(245, 158, 11, 0.15)"
-                      stroke="var(--amber)"
-                      strokeWidth="0.004"
-                      strokeLinejoin="round"
-                      strokeLinecap="round"
-                    />
-                  );
-                })()
-              ) : (
-                <path
-                  d={currentPathData}
-                  fill={isDrawing ? "none" : "rgba(245, 158, 11, 0.15)"}
-                  stroke="var(--amber)"
-                  strokeWidth="0.004"
-                  strokeLinejoin="round"
-                  strokeLinecap="round"
-                />
-              )}
-            </>
+            <path
+              d={currentPathData}
+              fill={isDrawing ? "none" : "rgba(245, 158, 11, 0.15)"}
+              stroke="var(--amber)"
+              strokeWidth="0.004"
+              strokeLinejoin="round"
+              strokeLinecap="round"
+            />
           )}
 
           {isDrawing && rawPoints.length > 0 && (
@@ -384,7 +270,7 @@ export default function ZoneEditor({
           )}
         </svg>
 
-        {/* Mode label */}
+        {/* Draw source label */}
         <div style={{
           position: "absolute",
           top: 8, left: 8,
@@ -463,113 +349,43 @@ export default function ZoneEditor({
           </button>
         </div>
 
-        {/* Zone type selector */}
-        {activePointCount >= 3 && (
-          <div style={{ marginTop: 10 }}>
-            <div style={{
-              fontFamily: "var(--font-mono)",
-              fontSize: 10,
-              color: "var(--text-ghost)",
-              marginBottom: 6,
-              letterSpacing: "0.04em",
-              textTransform: "uppercase",
-            }}>
-              Zone type
-            </div>
-
-            <div style={{ display: "flex", gap: 4, marginBottom: 6 }}>
-              {(["2d", "auto_3d", "manual_3d"] as const).map((m) => {
-                const cfg = MODE_LABELS[m];
-                const active = zoneMode === m;
-                return (
-                  <button
-                    key={m}
-                    onClick={() => setZoneMode(m)}
-                    style={{
-                      flex: 1,
-                      padding: "8px 6px",
-                      background: active ? "var(--bg-elevated)" : "var(--bg-deep)",
-                      border: `1px solid ${active ? cfg.color : "var(--border-subtle)"}`,
-                      borderRadius: "var(--radius-sm)",
-                      color: active ? cfg.color : "var(--text-ghost)",
-                      cursor: "pointer",
-                      fontFamily: "var(--font-mono)",
-                      fontSize: 10,
-                      fontWeight: active ? 600 : 400,
-                      textAlign: "center",
-                      transition: "all 0.15s",
-                    }}
-                  >
-                    {cfg.label}
-                  </button>
-                );
-              })}
-            </div>
-
-            <div style={{
-              fontFamily: "var(--font-mono)",
-              fontSize: 10,
-              color: "var(--text-ghost)",
-              marginBottom: zoneMode !== "2d" ? 8 : 0,
-              fontStyle: "italic",
-            }}>
-              {MODE_LABELS[zoneMode].desc}
-            </div>
-
-            {zoneMode !== "2d" && (
-              <HeightSlider
-                heightMin={heightMin}
-                heightMax={heightMax}
-                onChangeMin={setHeightMin}
-                onChangeMax={setHeightMax}
-              />
-            )}
-          </div>
-        )}
-
         {/* Existing zones list */}
         {zones.length > 0 && (
           <div style={{ marginTop: 12 }}>
             <div className="label" style={{ marginBottom: 6 }}>Existing Zones</div>
-            {zones.map((zone) => {
-              const is3d = zone.mode && zone.mode !== "2d";
-              return (
-                <div
-                  key={zone.id}
-                  style={{
-                    display: "flex",
-                    justifyContent: "space-between",
-                    alignItems: "center",
-                    padding: "7px 10px",
-                    background: "var(--bg-deep)",
-                    borderRadius: "var(--radius-sm)",
-                    borderLeft: `3px solid ${is3d ? "var(--amber)" : "var(--red)"}`,
-                    marginBottom: 3,
-                    fontFamily: "var(--font-mono)",
-                    fontSize: 11,
-                  }}
-                >
-                  <div style={{ display: "flex", flexDirection: "column", gap: 1 }}>
-                    <span style={{ color: is3d ? "var(--amber)" : "var(--red)" }}>
-                      {zone.name}
-                    </span>
-                    <span style={{ fontSize: 9, color: "var(--text-ghost)" }}>
-                      {is3d
-                        ? `${zone.mode === "auto_3d" ? "Auto" : "Manual"} 3D · ${zone.height_min}–${zone.height_max} cm`
-                        : "2D flat"
-                      }
-                    </span>
-                  </div>
-                  <button
-                    className="btn btn-danger btn-sm"
-                    onClick={() => handleDeleteZone(zone.id)}
-                    style={{ padding: "2px 8px", fontSize: 10 }}
-                  >
-                    Delete
-                  </button>
+            {zones.map((zone) => (
+              <div
+                key={zone.id}
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                  padding: "7px 10px",
+                  background: "var(--bg-deep)",
+                  borderRadius: "var(--radius-sm)",
+                  borderLeft: "3px solid var(--red)",
+                  marginBottom: 3,
+                  fontFamily: "var(--font-mono)",
+                  fontSize: 11,
+                }}
+              >
+                <div style={{ display: "flex", flexDirection: "column", gap: 1 }}>
+                  <span style={{ color: "var(--red)" }}>
+                    {zone.name}
+                  </span>
+                  <span style={{ fontSize: 9, color: "var(--text-ghost)" }}>
+                    {zone.polygon.length} pts
+                  </span>
                 </div>
-              );
-            })}
+                <button
+                  className="btn btn-danger btn-sm"
+                  onClick={() => handleDeleteZone(zone.id)}
+                  style={{ padding: "2px 8px", fontSize: 10 }}
+                >
+                  Delete
+                </button>
+              </div>
+            ))}
           </div>
         )}
       </div>

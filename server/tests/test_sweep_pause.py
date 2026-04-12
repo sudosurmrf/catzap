@@ -1,16 +1,32 @@
-import time
 from unittest.mock import MagicMock
 from server.panorama.sweep_controller import SweepController, SweepState
 
 
+class MockClock:
+    """Deterministic time source so grace-window tests don't need real sleeps."""
+
+    def __init__(self, start: float = 1000.0):
+        self.now = start
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
 def make_controller(**kwargs):
     actuator = MagicMock()
+    clock = kwargs.pop("clock", None) or MockClock()
     defaults = dict(
         actuator=actuator, pan_min=30, pan_max=150,
         tilt_min=20, tilt_max=70, speed=10, dev_mode=True,
+        time_source=clock,
     )
     defaults.update(kwargs)
-    return SweepController(**defaults)
+    sc = SweepController(**defaults)
+    sc._clock = clock  # stash for tests that need to advance it
+    return sc
 
 
 def test_pause_from_sweeping():
@@ -45,21 +61,28 @@ def test_resume_continues_from_position():
     assert sc.current_pan != 90.0
 
 
-def test_pause_queues_during_warning():
+def test_pause_queues_during_engaging():
+    """Pause requested while ENGAGING should queue, not take effect immediately
+    — the controller finishes handling the cat before returning to sweep/pause."""
     sc = make_controller()
     sc.on_cat_in_zone(90, 45, "table")
-    assert sc.state == SweepState.WARNING
+    assert sc.state == SweepState.ENGAGING
     sc.pause()
-    assert sc.state == SweepState.WARNING
+    assert sc.state == SweepState.ENGAGING
     assert sc.pause_queued is True
 
 
-def test_queued_pause_activates_on_return_to_sweeping():
+def test_queued_pause_activates_after_grace_expiry():
+    """A queued pause should take effect when ENGAGING transitions out via
+    the grace window — the cat is gone and we were about to return to
+    SWEEPING anyway, but the queued pause redirects to PAUSED instead."""
     sc = make_controller()
     sc.on_cat_in_zone(90, 45, "table")
     sc.pause()
     assert sc.pause_queued is True
-    sc.on_cat_left_zone()
+    # Advance past the 3000 ms engagement grace window with no new zone reports.
+    sc._clock.advance(3.5)
+    sc.tick(0.0)
     assert sc.state == SweepState.PAUSED
 
 
@@ -70,17 +93,10 @@ def test_emergency_stop_from_sweeping():
     assert sc.armed is False
 
 
-def test_emergency_stop_from_warning():
+def test_emergency_stop_from_engaging():
     sc = make_controller()
     sc.on_cat_in_zone(90, 45, "table")
-    sc.emergency_stop()
-    assert sc.state == SweepState.STOPPED
-    assert sc.armed is False
-
-
-def test_emergency_stop_from_firing():
-    sc = make_controller()
-    sc.state = SweepState.FIRING
+    assert sc.state == SweepState.ENGAGING
     sc.emergency_stop()
     assert sc.state == SweepState.STOPPED
     assert sc.armed is False
@@ -100,18 +116,6 @@ def test_clear_estop():
     sc.clear_emergency_stop()
     assert sc.state == SweepState.SWEEPING
     assert sc.armed is False
-
-
-def test_queued_pause_activates_after_tracking_timeout():
-    sc = make_controller(tracking_duration=0.5)
-    sc.state = SweepState.TRACKING
-    sc._tracking_start = time.time()
-    sc.pause()
-    assert sc.pause_queued is True
-    # Simulate enough time for tracking to expire
-    time.sleep(0.6)
-    sc.tick(0.1)
-    assert sc.state == SweepState.PAUSED
 
 
 def test_clear_estop_only_works_when_stopped():

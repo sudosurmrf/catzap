@@ -1,8 +1,6 @@
 import { useState, useEffect } from "react";
-import type { Zone, ZoneTransform } from "../types";
-import { DEFAULT_TRANSFORM } from "../types";
-import { createZone, deleteZone, createFurniture, updateZone, updateFurniture, estimateHeight } from "../api/client";
-import HeightSlider from "./HeightSlider";
+import type { Zone } from "../types";
+import { createZone, deleteZone, updateZone } from "../api/client";
 
 interface ZoneConfigPanelProps {
   zones: Zone[];
@@ -13,53 +11,35 @@ interface ZoneConfigPanelProps {
   selectedZoneId?: string | null;
   onSelectZone?: (id: string | null) => void;
   onZoneUpdated?: () => void;
-  transform?: ZoneTransform;
-  onTransformChange?: (t: ZoneTransform) => void;
-}
-
-const MODE_LABELS: Record<string, { label: string; desc: string; color: string }> = {
-  "2d": { label: "2D Flat", desc: "Standard flat zone — no height", color: "var(--text-tertiary)" },
-  "auto_3d": { label: "Auto 3D", desc: "Depth camera estimates volume", color: "var(--cyan)" },
-  "manual_3d": { label: "Manual 3D", desc: "Set height range manually", color: "var(--amber)" },
-};
-
-// Apply transform to polygon (must match PanoramaView logic)
-function applyTransform(poly: number[][], t: ZoneTransform): number[][] {
-  let sx = 0, sy = 0;
-  for (const [x, y] of poly) { sx += x; sy += y; }
-  const cx = sx / poly.length, cy = sy / poly.length;
-  return poly.map(([x, y]) => {
-    let dx = x - cx, dy = y - cy;
-    dx *= t.scaleX;
-    dy *= t.scaleY;
-    const skewedX = dx + dy * t.skewX;
-    const skewedY = dy + dx * t.skewY;
-    return [cx + skewedX, cy + skewedY];
-  });
 }
 
 export default function ZoneConfigPanel({
   zones, pendingPolygon, onSaved, onClearPending, onExit,
   selectedZoneId, onSelectZone, onZoneUpdated,
-  transform = { ...DEFAULT_TRANSFORM }, onTransformChange,
 }: ZoneConfigPanelProps) {
   const [zoneName, setZoneName] = useState("");
   const [saving, setSaving] = useState(false);
-  const [estimating, setEstimating] = useState(false);
 
   // Edit mode state
   const [editName, setEditName] = useState("");
+  const [editOverlapThreshold, setEditOverlapThreshold] = useState(0.3);
+  const [editEnabled, setEditEnabled] = useState(true);
   const [editSaving, setEditSaving] = useState(false);
+
+  // New zone state
+  const [overlapThreshold, setOverlapThreshold] = useState(0.3);
+  const [enabled, setEnabled] = useState(true);
 
   const selectedZone = selectedZoneId ? zones.find((z) => z.id === selectedZoneId) : null;
   const hasPoly = pendingPolygon && pendingPolygon.length >= 3;
   const canSave = hasPoly && zoneName.trim().length > 0 && !saving;
-  const is3d = transform.height > 0;
 
   // Sync edit fields when selection changes
   useEffect(() => {
     if (selectedZone) {
       setEditName(selectedZone.name);
+      setEditOverlapThreshold(selectedZone.overlap_threshold ?? 0.3);
+      setEditEnabled(selectedZone.enabled ?? true);
     }
   }, [selectedZoneId]);
 
@@ -67,49 +47,19 @@ export default function ZoneConfigPanel({
   async function handleSave() {
     if (!canSave || !pendingPolygon) return;
     setSaving(true);
-    const name = zoneName.trim();
-
-    // Bake the transform into the final polygon
-    const finalPoly = applyTransform(pendingPolygon, transform);
-    const heightMax = transform.height;
-    const mode = heightMax > 0 ? "manual_3d" : "2d";
-
     try {
-      if (heightMax > 0) {
-        await createFurniture({
-          name,
-          base_polygon: finalPoly,
-          height_min: 0,
-          height_max: heightMax,
-        });
-      }
       await createZone({
-        name,
-        polygon: finalPoly,
-        mode,
-        height_min: 0,
-        height_max: heightMax,
+        name: zoneName.trim(),
+        polygon: pendingPolygon,
+        overlap_threshold: overlapThreshold,
+        enabled,
       });
       setZoneName("");
+      setOverlapThreshold(0.3);
+      setEnabled(true);
       onSaved();
     } finally {
       setSaving(false);
-    }
-  }
-
-  // ── Auto estimate height ────────────────────────
-  async function handleAutoEstimate() {
-    if (!pendingPolygon || pendingPolygon.length < 3) return;
-    setEstimating(true);
-    try {
-      const result = await estimateHeight(pendingPolygon);
-      if (result.estimated && onTransformChange) {
-        onTransformChange({ ...transform, height: result.height_max });
-      }
-    } catch (e) {
-      console.warn("Height estimation failed:", e);
-    } finally {
-      setEstimating(false);
     }
   }
 
@@ -117,25 +67,13 @@ export default function ZoneConfigPanel({
   async function handleEditSave() {
     if (!selectedZone || editSaving) return;
     setEditSaving(true);
-    const heightMax = transform.height;
-    const mode = heightMax > 0 ? "manual_3d" : "2d";
-    // Bake width/length/skew transform into the polygon (same as new zone save)
-    const finalPoly = applyTransform(selectedZone.polygon, transform);
     try {
       await updateZone(selectedZone.id, {
         name: editName.trim() || selectedZone.name,
-        polygon: finalPoly,
-        mode,
-        height_min: 0,
-        height_max: heightMax,
+        polygon: selectedZone.polygon,
+        overlap_threshold: editOverlapThreshold,
+        enabled: editEnabled,
       });
-      if (selectedZone.furniture_id && heightMax > 0) {
-        await updateFurniture(selectedZone.furniture_id, {
-          name: editName.trim() || selectedZone.name,
-          height_min: 0,
-          height_max: heightMax,
-        });
-      }
       onZoneUpdated?.();
     } finally {
       setEditSaving(false);
@@ -146,86 +84,6 @@ export default function ZoneConfigPanel({
     if (selectedZoneId === id) onSelectZone?.(null);
     await deleteZone(id);
     onSaved();
-  }
-
-  // ── Transform readout component ─────────────────
-  function TransformReadout() {
-    return (
-      <div style={{
-        display: "grid",
-        gridTemplateColumns: "1fr 1fr 1fr",
-        gap: 4,
-        marginTop: 8,
-      }}>
-        {/* Width (X) */}
-        <div style={{
-          padding: "6px 8px",
-          background: "var(--bg-deep)",
-          borderRadius: "var(--radius-sm)",
-          borderLeft: "3px solid rgba(239, 68, 68, 0.7)",
-        }}>
-          <div style={{ fontFamily: "var(--font-mono)", fontSize: 9, color: "rgba(239, 68, 68, 0.7)", textTransform: "uppercase", letterSpacing: "0.06em" }}>
-            Width
-          </div>
-          <div style={{ fontFamily: "var(--font-mono)", fontSize: 13, color: "var(--text-primary)", fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>
-            {transform.scaleX.toFixed(1)}x
-          </div>
-        </div>
-        {/* Length (Y) */}
-        <div style={{
-          padding: "6px 8px",
-          background: "var(--bg-deep)",
-          borderRadius: "var(--radius-sm)",
-          borderLeft: "3px solid rgba(34, 197, 94, 0.7)",
-        }}>
-          <div style={{ fontFamily: "var(--font-mono)", fontSize: 9, color: "rgba(34, 197, 94, 0.7)", textTransform: "uppercase", letterSpacing: "0.06em" }}>
-            Length
-          </div>
-          <div style={{ fontFamily: "var(--font-mono)", fontSize: 13, color: "var(--text-primary)", fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>
-            {transform.scaleY.toFixed(1)}x
-          </div>
-        </div>
-        {/* Height (Z) */}
-        <div style={{
-          padding: "6px 8px",
-          background: "var(--bg-deep)",
-          borderRadius: "var(--radius-sm)",
-          borderLeft: "3px solid rgba(59, 130, 246, 0.7)",
-        }}>
-          <div style={{ fontFamily: "var(--font-mono)", fontSize: 9, color: "rgba(59, 130, 246, 0.7)", textTransform: "uppercase", letterSpacing: "0.06em" }}>
-            Height
-          </div>
-          <div style={{ fontFamily: "var(--font-mono)", fontSize: 13, color: "var(--text-primary)", fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>
-            {transform.height.toFixed(0)}cm
-          </div>
-        </div>
-        {/* Skew */}
-        {(transform.skewX !== 0 || transform.skewY !== 0) && (
-          <div style={{
-            gridColumn: "1 / -1",
-            padding: "4px 8px",
-            background: "var(--bg-deep)",
-            borderRadius: "var(--radius-sm)",
-            borderLeft: "3px solid var(--amber-dim)",
-            fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--text-ghost)",
-          }}>
-            Skew: {transform.skewX.toFixed(2)} / {transform.skewY.toFixed(2)}
-          </div>
-        )}
-        {(transform.slantX !== 0 || transform.slantY !== 0) && (
-          <div style={{
-            gridColumn: "1 / -1",
-            padding: "4px 8px",
-            background: "var(--bg-deep)",
-            borderRadius: "var(--radius-sm)",
-            borderLeft: "3px solid var(--amber-dim)",
-            fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--text-ghost)",
-          }}>
-            Slant: {transform.slantX.toFixed(2)} / {transform.slantY.toFixed(2)}
-          </div>
-        )}
-      </div>
-    );
   }
 
   return (
@@ -242,22 +100,29 @@ export default function ZoneConfigPanel({
           </div>
 
           <input type="text" value={editName} onChange={(e) => setEditName(e.target.value)}
-            style={{ width: "100%", fontSize: 12, marginBottom: 6 }} />
+            style={{ width: "100%", fontSize: 12, marginBottom: 10 }} />
 
-          <TransformReadout />
-
-          <div style={{
-            marginTop: 8, padding: "6px 10px", background: "var(--bg-deep)",
-            borderRadius: "var(--radius-sm)", fontFamily: "var(--font-mono)", fontSize: 10,
-            color: "var(--text-ghost)", textAlign: "center", lineHeight: 1.5,
-          }}>
-            Drag <span style={{ color: "rgba(239,68,68,0.9)" }}>W</span> /
-            <span style={{ color: "rgba(34,197,94,0.9)" }}> L</span> /
-            <span style={{ color: "rgba(59,130,246,0.9)" }}> H</span> arrows to scale.
-            Diamonds to skew.
+          {/* Sensitivity (overlap_threshold) */}
+          <div style={{ marginBottom: 10 }}>
+            <div className="label" style={{ marginBottom: 4 }}>
+              Sensitivity: {Math.round(editOverlapThreshold * 100)}%
+            </div>
+            <input type="range" min={0} max={1} step={0.01}
+              value={editOverlapThreshold}
+              onChange={(e) => setEditOverlapThreshold(parseFloat(e.target.value))}
+              style={{ width: "100%" }} />
           </div>
 
-          <div style={{ display: "flex", gap: 6, marginTop: 10 }}>
+          {/* Enabled toggle */}
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+            <input type="checkbox" id="edit-enabled" checked={editEnabled}
+              onChange={(e) => setEditEnabled(e.target.checked)} />
+            <label htmlFor="edit-enabled" className="label" style={{ cursor: "pointer" }}>
+              Zone enabled
+            </label>
+          </div>
+
+          <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
             <button className="btn btn-primary" onClick={handleEditSave} disabled={editSaving}
               style={{ flex: 1, opacity: editSaving ? 0.4 : 1, justifyContent: "center" }}>
               {editSaving ? "Saving..." : "Save Changes"}
@@ -279,8 +144,7 @@ export default function ZoneConfigPanel({
             fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--text-tertiary)",
             lineHeight: 1.6, margin: 0,
           }}>
-            Draw a 2D outline on the live feed or panorama. Then use the
-            transform gizmo to scale, extrude height, and skew into 3D.
+            Draw a 2D outline on the live feed or panorama.
           </p>
           <div style={{
             marginTop: 12, padding: "6px 10px", background: "var(--bg-deep)",
@@ -305,44 +169,29 @@ export default function ZoneConfigPanel({
 
           <input type="text" placeholder="Zone name (e.g., Kitchen Table)..."
             value={zoneName} onChange={(e) => setZoneName(e.target.value)}
-            style={{ width: "100%", fontSize: 12, marginBottom: 6 }} autoFocus />
+            style={{ width: "100%", fontSize: 12, marginBottom: 10 }} autoFocus />
 
-          {/* Transform readout — live from gizmo */}
-          <TransformReadout />
-
-          <div style={{
-            marginTop: 8, padding: "6px 10px", background: "var(--bg-deep)",
-            borderRadius: "var(--radius-sm)", fontFamily: "var(--font-mono)", fontSize: 10,
-            color: "var(--text-ghost)", textAlign: "center", lineHeight: 1.5,
-          }}>
-            Drag <span style={{ color: "rgba(239,68,68,0.9)" }}>W</span> to widen,
-            <span style={{ color: "rgba(34,197,94,0.9)" }}> L</span> to lengthen,
-            <span style={{ color: "rgba(59,130,246,0.9)" }}> H</span> to extrude height.
-            Pull <span style={{ color: "var(--amber)" }}>diamonds</span> to skew.
+          {/* Sensitivity (overlap_threshold) */}
+          <div style={{ marginBottom: 10 }}>
+            <div className="label" style={{ marginBottom: 4 }}>
+              Sensitivity: {Math.round(overlapThreshold * 100)}%
+            </div>
+            <input type="range" min={0} max={1} step={0.01}
+              value={overlapThreshold}
+              onChange={(e) => setOverlapThreshold(parseFloat(e.target.value))}
+              style={{ width: "100%" }} />
           </div>
 
-          {/* Auto estimate button */}
-          <button className="btn btn-sm" onClick={handleAutoEstimate} disabled={estimating}
-            style={{
-              marginTop: 6, width: "100%", justifyContent: "center",
-              opacity: estimating ? 0.4 : 1, fontFamily: "var(--font-mono)", fontSize: 10,
-            }}>
-            {estimating ? "Estimating..." : "Auto-detect height from depth camera"}
-          </button>
+          {/* Enabled toggle */}
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+            <input type="checkbox" id="new-enabled" checked={enabled}
+              onChange={(e) => setEnabled(e.target.checked)} />
+            <label htmlFor="new-enabled" className="label" style={{ cursor: "pointer" }}>
+              Zone enabled
+            </label>
+          </div>
 
-          {/* Manual height override */}
-          {is3d && (
-            <div style={{ marginTop: 8 }}>
-              <HeightSlider
-                heightMin={0}
-                heightMax={Math.round(transform.height)}
-                onChangeMin={() => {}}
-                onChangeMax={(v) => onTransformChange?.({ ...transform, height: v })}
-              />
-            </div>
-          )}
-
-          <div style={{ display: "flex", gap: 6, marginTop: 10 }}>
+          <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
             <button className="btn btn-primary" onClick={handleSave} disabled={!canSave}
               style={{ flex: 1, opacity: canSave ? 1 : 0.4, justifyContent: "center" }}>
               {saving ? "Saving..." : "Save Zone"}
@@ -359,7 +208,6 @@ export default function ZoneConfigPanel({
             Existing Zones ({zones.length})
           </div>
           {zones.map((zone) => {
-            const z3d = zone.mode && zone.mode !== "2d";
             const isSel = zone.id === selectedZoneId;
             return (
               <div key={zone.id}
@@ -369,16 +217,16 @@ export default function ZoneConfigPanel({
                   padding: "7px 10px",
                   background: isSel ? "var(--bg-elevated)" : "var(--bg-deep)",
                   borderRadius: "var(--radius-sm)",
-                  borderLeft: `3px solid ${isSel ? "var(--cyan)" : z3d ? "var(--amber)" : "var(--red)"}`,
+                  borderLeft: `3px solid ${isSel ? "var(--cyan)" : zone.enabled ? "var(--red)" : "var(--text-ghost)"}`,
                   marginBottom: 3, fontFamily: "var(--font-mono)", fontSize: 11,
                   cursor: isSel ? "default" : "pointer", transition: "all 0.15s",
                 }}>
                 <div style={{ display: "flex", flexDirection: "column", gap: 1 }}>
-                  <span style={{ color: isSel ? "var(--cyan)" : z3d ? "var(--amber)" : "var(--red)" }}>
+                  <span style={{ color: isSel ? "var(--cyan)" : zone.enabled ? "var(--red)" : "var(--text-ghost)" }}>
                     {zone.name}
                   </span>
                   <span style={{ fontSize: 9, color: "var(--text-ghost)" }}>
-                    {z3d ? `3D · ${zone.height_min}-${zone.height_max} cm` : "2D flat"}
+                    {zone.enabled ? "active" : "disabled"} · {Math.round((zone.overlap_threshold ?? 0.3) * 100)}% sensitivity
                   </span>
                 </div>
                 <div style={{ display: "flex", gap: 4 }}>

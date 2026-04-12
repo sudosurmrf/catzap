@@ -32,13 +32,15 @@ async def test_create_and_get_zone():
         name="Kitchen Counter",
         polygon=[[0.1, 0.2], [0.5, 0.2], [0.5, 0.8], [0.1, 0.8]],
         overlap_threshold=0.3,
-        cooldown_seconds=10,
     )
     zones = await get_zones()
     assert len(zones) == 1
     assert zones[0]["name"] == "Kitchen Counter"
     assert zones[0]["id"] == zone_id
     assert zones[0]["enabled"] == True
+    assert zones[0]["overlap_threshold"] == 0.3
+    assert "polygon" in zones[0]
+    assert "created_at" in zones[0]
 
 
 @pytest.mark.asyncio

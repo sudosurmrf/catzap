@@ -1,0 +1,93 @@
+{
+  "version": 2,
+  "created_at": "2026-04-11T20:26:59Z",
+  "home_pan": 117.0,
+  "home_tilt": 37.0,
+  "extent_corners": [
+    {
+      "label": "bl",
+      "servo_pan": 159.0,
+      "servo_tilt": 48.0
+    },
+    {
+      "label": "tl",
+      "servo_pan": 159.0,
+      "servo_tilt": 10.0
+    },
+    {
+      "label": "tr",
+      "servo_pan": 29.0,
+      "servo_tilt": 12.0
+    },
+    {
+      "label": "br",
+      "servo_pan": 29.0,
+      "servo_tilt": 61.0
+    }
+  ],
+  "bounds": {
+    "pan_min": 29.0,
+    "pan_max": 159.0,
+    "tilt_min": 10.0,
+    "tilt_max": 61.0
+  },
+  "tile_cols": 3,
+  "tile_rows": 2,
+  "verification": [
+    {
+      "tile_col": 0,
+      "tile_row": 0,
+      "expected_pan": 61.5,
+      "expected_tilt": 35.0,
+      "actual_pan": 61.5,
+      "actual_tilt": 35.0,
+      "residual": 0.0
+    },
+    {
+      "tile_col": 1,
+      "tile_row": 0,
+      "expected_pan": 116.5,
+      "expected_tilt": 35.0,
+      "actual_pan": 116.5,
+      "actual_tilt": 35.0,
+      "residual": 0.0
+    },
+    {
+      "tile_col": 2,
+      "tile_row": 0,
+      "expected_pan": 159.0,
+      "expected_tilt": 35.0,
+      "actual_pan": 159.0,
+      "actual_tilt": 35.0,
+      "residual": 0.0
+    },
+    {
+      "tile_col": 0,
+      "tile_row": 1,
+      "expected_pan": 61.5,
+      "expected_tilt": 61.0,
+      "actual_pan": 61.5,
+      "actual_tilt": 61.0,
+      "residual": 0.0
+    },
+    {
+      "tile_col": 1,
+      "tile_row": 1,
+      "expected_pan": 116.5,
+      "expected_tilt": 61.0,
+      "actual_pan": 116.5,
+      "actual_tilt": 61.0,
+      "residual": 0.0
+    },
+    {
+      "tile_col": 2,
+      "tile_row": 1,
+      "expected_pan": 159.0,
+      "expected_tilt": 61.0,
+      "actual_pan": 159.0,
+      "actual_tilt": 61.0,
+      "residual": 0.0
+    }
+  ],
+  "verification_passed": true
+}

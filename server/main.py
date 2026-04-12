@@ -8,26 +8,28 @@ from contextlib import asynccontextmanager
 
 import cv2
 import numpy as np
-import torch
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from server.config import settings
-from server.models.database import init_db, close_db, create_event, get_zones
-from server.routers import zones, cats, events, control, stream, settings as settings_router, spatial
+from server.models.database import init_db, close_db, create_event, get_zones, get_zones_version
+from server.routers import zones, cats, events, control, stream, settings as settings_router, furniture
 from server.routers import photos as photos_router, classifier as classifier_router
+from server.routers import calibration as calibration_router
 from server.routers.stream import MJPEGStreamReader, broadcast_to_clients, broadcast_event, store_latest_frame, has_feed_clients
 from server.vision.detector import CatDetector
 from server.vision.classifier import CatClassifier
 from server.vision.zone_checker import check_zone_violations
-from server.panorama.angle_math import pixel_to_angle
+from server.panorama.angle_math import calibrated_pixel_to_angle
 from server.panorama.tile_grid import TileGrid
 from server.panorama.sweep_controller import SweepController, SweepState
-from server.actuator.client import ActuatorClient
-from server.spatial.depth_estimator import DepthEstimator
-from server.spatial.room_model import RoomModel, FurnitureObject
-from server.spatial.projection import angle_depth_to_room
-from server.spatial.cat_tracker import CatTracker
+from server.actuator.client import ActuatorClient, snap_to_servo_step
+from server.actuator.calibration import (
+    load_calibration,
+    load_rig_settings,
+    set_active_calibration,
+    set_rig_settings,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -35,9 +37,6 @@ logger = logging.getLogger(__name__)
 _tile_grid: TileGrid | None = None
 _sweep_controller: SweepController | None = None
 _actuator: ActuatorClient | None = None
-_room_model = None
-_depth_estimator: DepthEstimator | None = None
-_cat_tracker: CatTracker | None = None
 _classifier: CatClassifier | None = None
 _classify_frame_counter: int = 0
 _cached_identities: dict[tuple[float, float], tuple[str, float]] = {}  # (cx, cy) -> (name, conf)
@@ -55,14 +54,6 @@ def get_actuator() -> ActuatorClient:
     return _actuator
 
 
-def get_room_model():
-    return _room_model
-
-
-def get_cat_tracker() -> CatTracker | None:
-    return _cat_tracker
-
-
 def reload_classifier():
     """Reload classifier weights after training."""
     global _classifier
@@ -72,7 +63,7 @@ def reload_classifier():
 
 
 async def run_vision_loop(app_state: dict):
-    global _tile_grid, _sweep_controller, _actuator, _depth_estimator, _room_model, _cat_tracker, _classifier
+    global _tile_grid, _sweep_controller, _actuator, _classifier
 
     logger.info(f"Vision loop starting (dev_mode={settings.dev_mode})")
     logger.info(f"ESP32-CAM URL: {settings.esp32_cam_url}")
@@ -115,64 +106,109 @@ async def run_vision_loop(app_state: dict):
 
     _actuator = ActuatorClient(base_url=settings.esp32_actuator_url)
 
+    # Load rig settings FIRST so bounds (if calibrated) are applied to both
+    # the tile grid and sweep controller at init time.
+    _rig_settings = load_rig_settings()
+    set_rig_settings(_rig_settings)
+    if _rig_settings.tilt_jog_inverted or _rig_settings.pan_jog_inverted:
+        logger.info(
+            f"Loaded rig settings: tilt_inverted={_rig_settings.tilt_jog_inverted}, "
+            f"pan_inverted={_rig_settings.pan_jog_inverted}"
+        )
+
+    # Use calibrated extent bounds if present, else fall back to config.
+    # Bounds are populated by the extent-capture phase of calibration and
+    # persisted in rig_settings.json so they survive restarts.
+    pan_min = _rig_settings.pan_min if _rig_settings.pan_min is not None else settings.sweep_pan_min
+    pan_max = _rig_settings.pan_max if _rig_settings.pan_max is not None else settings.sweep_pan_max
+    tilt_min = _rig_settings.tilt_min if _rig_settings.tilt_min is not None else settings.sweep_tilt_min
+    tilt_max = _rig_settings.tilt_max if _rig_settings.tilt_max is not None else settings.sweep_tilt_max
+    if _rig_settings.pan_min is not None:
+        logger.info(
+            f"Using calibrated extent bounds: "
+            f"pan=[{pan_min:.0f}..{pan_max:.0f}], "
+            f"tilt=[{tilt_min:.0f}..{tilt_max:.0f}]"
+        )
+    else:
+        logger.info("No calibrated extent bounds — using config defaults")
+
     _tile_grid = TileGrid(
-        pan_min=settings.sweep_pan_min,
-        pan_max=settings.sweep_pan_max,
-        tilt_min=settings.sweep_tilt_min,
-        tilt_max=settings.sweep_tilt_max,
+        pan_min=pan_min,
+        pan_max=pan_max,
+        tilt_min=tilt_min,
+        tilt_max=tilt_max,
         fov_h=settings.fov_horizontal,
         fov_v=settings.fov_vertical,
         tile_overlap=settings.tile_overlap,
     )
 
+    # Load persisted calibration (from a prior successful run) if present.
+    # The new Calibration schema doesn't carry a bilinear fit anymore — it
+    # just records the extent corners, tile grid dimensions, and verification
+    # residuals. The runtime behavior is driven by rig_settings bounds (loaded
+    # above) and the analytic pinhole FOV; the Calibration record is mostly
+    # for display/history and future per-tile refinement.
+    _persisted_cal = load_calibration()
+    if _persisted_cal is not None:
+        set_active_calibration(_persisted_cal)
+        logger.info(
+            f"Loaded calibration from {_persisted_cal.created_at}: "
+            f"bounds pan=[{_persisted_cal.bounds.pan_min:.0f}..{_persisted_cal.bounds.pan_max:.0f}] "
+            f"tilt=[{_persisted_cal.bounds.tilt_min:.0f}..{_persisted_cal.bounds.tilt_max:.0f}], "
+            f"tiles={_persisted_cal.tile_cols}×{_persisted_cal.tile_rows}, "
+            f"verification_passed={_persisted_cal.verification_passed}"
+        )
+    else:
+        logger.info("No persisted calibration found — run aim calibration to define extent")
+
     _sweep_controller = SweepController(
         actuator=_actuator,
-        pan_min=settings.sweep_pan_min,
-        pan_max=settings.sweep_pan_max,
-        tilt_min=settings.sweep_tilt_min,
-        tilt_max=settings.sweep_tilt_max,
+        pan_min=pan_min,
+        pan_max=pan_max,
+        tilt_min=tilt_min,
+        tilt_max=tilt_max,
         speed=settings.sweep_speed,
-        warning_duration=settings.warning_duration,
-        tracking_duration=settings.tracking_duration,
-        cooldown=settings.cooldown_default,
-        reentry_warning=settings.reentry_warning,
-        lock_on_grace=settings.lock_on_grace,
+        min_shot_interval_ms=settings.min_shot_interval_ms,
+        engagement_grace_ms=settings.engagement_grace_ms,
         dev_mode=settings.dev_mode,
     )
 
-    _depth_estimator = DepthEstimator(model_type=settings.midas_model)
-    _room_model = RoomModel(
-        width_cm=settings.room_width_cm,
-        depth_cm=settings.room_depth_cm,
-        height_cm=settings.room_height_cm,
-        resolution=settings.heightmap_resolution,
-    )
-    _cat_tracker = CatTracker(
-        occlusion_timeout=settings.occlusion_timeout,
-        grace_frames=settings.occlusion_grace_frames,
-    )
-    _classifier = CatClassifier()
-    weights_path = settings.classifier_weights_dir / "cat_classifier.pt"
-    _classifier.load(weights_path)
-    depth_frame_counter = 0
-    needs_depth = False  # updated each frame based on whether 3D zones exist
-
-    # Load persisted furniture into room model
-    from server.models.database import get_furniture as db_get_furniture
-    persisted_furniture = await db_get_furniture()
-    for f in persisted_furniture:
-        _room_model.add_furniture(FurnitureObject(
-            id=f["id"],
-            name=f["name"],
-            base_polygon=[tuple(p) for p in f["base_polygon"]],
-            height_min=f["height_min"],
-            height_max=f["height_max"],
-            depth_anchored=f["depth_anchored"],
-        ))
+    # Per-cat identity classifier is disabled. The YOLO detector still
+    # detects "is this a cat" — we just skip the second-stage MobileNet
+    # classifier that maps a crop to a specific cat name. Frees ~50-200ms
+    # of CPU per inference cycle, which is the main reason detection felt
+    # sluggish whenever a cat was in view. Re-enable by uncommenting and
+    # restoring the cached_identities propagation in the inference worker.
+    _classifier = None
 
     last_time = time.time()
     frame_count = 0
     cached_pano_b64: str | None = None
+
+    # Zone cache: pulled from DB only when the version counter bumps. Avoids
+    # an async pool acquire on every iteration of the vision loop.
+    cached_zones: list = []
+    cached_zones_version: int = -1
+
+    # Panorama tile refresh decimator: per-frame stitching is wasted work for
+    # a UI element nobody watches at full FPS. Throttle to ~5 Hz wall clock.
+    last_tile_refresh_time: float = 0.0
+
+    # Track the last pan/tilt we actually sent to the ESP32 (as the int the
+    # firmware will write). The main loop only re-sends when this changes —
+    # prevents the 10 Hz goto() spam from racing with direct gotos (jog,
+    # fire-path) on the shared httpx client, which was causing the pan servo
+    # to ring.
+    _last_sent_pan_int: int | None = None
+    _last_sent_tilt_int: int | None = None
+
+    # In-flight goto guard. The dedupe block below spawns gotos as fire-and-
+    # forget tasks; if the network is degraded each task takes ~2s to time
+    # out and they pile up unbounded on the actuator's traverse_lock. Holding
+    # a single reference and skipping new spawns while one is still pending
+    # caps the queue depth at 1 — under failure we drop intermediate poses
+    # rather than queue them, which is the right tradeoff for a tracking rig.
+    _goto_task: asyncio.Task | None = None
 
     # Detection smoother: holds recent detections for a grace window so
     # single-frame YOLO misses don't cause flicker.
@@ -186,14 +222,15 @@ async def run_vision_loop(app_state: dict):
     # the main loop can keep streaming frames without blocking on inference.
     _infer_lock = threading.Lock()
     _latest_raw_dets: list[dict] = []        # written by inference thread
-    _latest_depth: np.ndarray | None = None  # written by inference thread
+    _latest_inf_pan: float = 0.0             # servo pan at time the published frame was captured
+    _latest_inf_tilt: float = 0.0            # servo tilt at time the published frame was captured
     _new_results_ready = False               # flag: main loop should consume results
     _infer_queue: queue.Queue = queue.Queue(maxsize=1)  # drop-newest: only latest frame matters
     _infer_stop = threading.Event()
 
     def _inference_worker():
         """Persistent worker thread — processes one frame at a time from the queue."""
-        nonlocal _latest_raw_dets, _latest_depth, _new_results_ready
+        nonlocal _latest_raw_dets, _latest_inf_pan, _latest_inf_tilt, _new_results_ready
         global _cached_identities
 
         while not _infer_stop.is_set():
@@ -201,7 +238,7 @@ async def run_vision_loop(app_state: dict):
                 job = _infer_queue.get(timeout=0.5)
             except queue.Empty:
                 continue
-            inf_frame, inf_servo_pan, inf_servo_tilt, do_depth, do_classify = job
+            inf_frame, inf_servo_pan, inf_servo_tilt, do_classify = job
 
             try:
                 raw_dets = detector.detect(inf_frame)
@@ -250,17 +287,10 @@ async def run_vision_loop(app_state: dict):
                             det["cat_name"] = name
                             det["cat_confidence"] = conf
 
-                # Depth estimation
-                depth_result = None
-                if do_depth:
-                    try:
-                        depth_result = _depth_estimator.estimate(inf_frame)
-                    except Exception as e:
-                        logger.warning(f"Depth estimation failed: {e}")
-
                 with _infer_lock:
                     _latest_raw_dets = raw_dets
-                    _latest_depth = depth_result
+                    _latest_inf_pan = inf_servo_pan
+                    _latest_inf_tilt = inf_servo_tilt
                     _new_results_ready = True
             except Exception as e:
                 logger.error(f"Inference error: {e}")
@@ -280,21 +310,56 @@ async def run_vision_loop(app_state: dict):
             # Advance state machine
             _sweep_controller.tick(dt)
 
-            # Command servos to current position (sweep or tracking)
+            # Command servos to current position (sweep or tracking). Dedupe
+            # against the last-sent SERVO-SNAPPED angle — ActuatorClient snaps
+            # to the mechanical 2° resolution before sending, so the dedupe
+            # must use the same snap function or we'd skip sends whenever the
+            # intended float moves past a 2°-boundary.
             if not settings.dev_mode:
-                await _actuator.goto(_sweep_controller.current_pan, _sweep_controller.current_tilt)
+                pan_int = snap_to_servo_step(_sweep_controller.current_pan)
+                tilt_int = snap_to_servo_step(_sweep_controller.current_tilt)
+                if pan_int != _last_sent_pan_int or tilt_int != _last_sent_tilt_int:
+                    # Fire-and-forget rate-limited traverse: routes through
+                    # _actuator.goto() (no direct=True), which sub-steps the
+                    # move in 6°/30ms increments. For sweep this is identical
+                    # to the legacy 1° behavior because each sweep iteration
+                    # only advances current_pan by a fraction of a degree —
+                    # the dedupe rarely crosses a 1° boundary, and when it
+                    # does the traverse runs as a single sub-step with no
+                    # sleep. For tracking jumps the moderate pacing lets the
+                    # camera capture multiple detection frames during the
+                    # move so the targeting can refine instead of overshoot.
+                    #
+                    # Skip-while-pending guard: if the previous goto is still
+                    # in-flight (slow link, big tracking traverse, etc.), drop
+                    # this iteration's goto rather than queueing another task.
+                    # The next iteration will reattempt with the latest pose.
+                    # Caps in-flight goto count at exactly 1 — no backlog.
+                    if _goto_task is None or _goto_task.done():
+                        _goto_task = asyncio.create_task(
+                            _actuator.goto(
+                                _sweep_controller.current_pan,
+                                _sweep_controller.current_tilt,
+                            )
+                        )
+                        _last_sent_pan_int = pan_int
+                        _last_sent_tilt_int = tilt_int
 
-            # Grab frame
+            # Grab frame. In production we also receive the original JPEG
+            # bytes alongside the decoded numpy array — the websocket
+            # broadcast can re-emit those without paying for a re-encode.
+            jpg_bytes: bytes | None = None
             if settings.dev_mode:
                 ret, frame = cap.read()
                 if not ret or frame is None:
                     await asyncio.sleep(0.05)
                     continue
             else:
-                frame = await reader.read_frame()
-                if frame is None:
+                result = await reader.read_frame()
+                if result is None:
                     await asyncio.sleep(0.1)
                     continue
+                frame, jpg_bytes = result
 
             servo_pan = _sweep_controller.current_pan
             servo_tilt = _sweep_controller.current_tilt
@@ -302,37 +367,37 @@ async def run_vision_loop(app_state: dict):
             # Cache latest frame for depth estimation API
             store_latest_frame(frame, servo_pan, servo_tilt)
 
-            # Update tile grid (smart refresh)
-            col, row = _tile_grid.angle_to_tile_index(servo_pan, servo_tilt)
-            if _tile_grid.should_refresh(col, row, frame, settings.tile_refresh_threshold):
-                _tile_grid.update_tile(col, row, frame)
+            # Paint the current frame onto the panorama canvas at its servo
+            # angle. Throttled to ~5 Hz — the panorama is a background
+            # reference, not a real-time feed.
+            if (now - last_tile_refresh_time) >= 0.2:
+                _tile_grid.paint_frame(servo_pan, servo_tilt, frame)
+                last_tile_refresh_time = now
 
             # ── Submit inference job if worker is idle ──────
             global _classify_frame_counter, _cached_identities
             frame_count += 1
             if _infer_queue.empty() and frame_count % settings.frame_skip_n == 0:
                 _classify_frame_counter += 1
-                depth_frame_counter += 1
                 do_classify = (_classify_frame_counter % settings.classify_every_n_frames == 0)
-                do_depth = needs_depth and (depth_frame_counter % settings.depth_run_interval == 0)
                 # Copy frame so the worker thread owns its data; drop if queue full
                 try:
                     _infer_queue.put_nowait(
-                        (frame.copy(), servo_pan, servo_tilt, do_depth, do_classify)
+                        (frame.copy(), servo_pan, servo_tilt, do_classify)
                     )
                 except queue.Full:
                     pass  # worker still busy — skip this frame
 
             # ── Consume latest inference results if available ──
             raw_detections = None
-            current_depth = None
+            inf_pose_pan = servo_pan   # fallback if no new results this iteration
+            inf_pose_tilt = servo_tilt
             with _infer_lock:
                 if _new_results_ready:
                     raw_detections = _latest_raw_dets
-                    current_depth = _latest_depth
-                    # Clear references so GC can reclaim detection/depth data
+                    inf_pose_pan = _latest_inf_pan
+                    inf_pose_tilt = _latest_inf_tilt
                     _latest_raw_dets = []
-                    _latest_depth = None
                     _new_results_ready = False
 
             if raw_detections is not None:
@@ -354,6 +419,8 @@ async def run_vision_loop(app_state: dict):
                         best_match["bbox"] = rd["bbox"]
                         best_match["confidence"] = rd["confidence"]
                         best_match["_last_seen"] = now
+                        best_match["_pose_pan"] = inf_pose_pan
+                        best_match["_pose_tilt"] = inf_pose_tilt
                         if "cat_name" in rd:
                             best_match["cat_name"] = rd["cat_name"]
                         if "cat_confidence" in rd:
@@ -364,6 +431,8 @@ async def run_vision_loop(app_state: dict):
                             **rd,
                             "_last_seen": now,
                             "_id": det_next_id,
+                            "_pose_pan": inf_pose_pan,
+                            "_pose_tilt": inf_pose_tilt,
                         })
                         det_next_id += 1
 
@@ -373,135 +442,177 @@ async def run_vision_loop(app_state: dict):
                 if (now - sd["_last_seen"]) < det_hold_time
             ]
 
-            # Build the detections list for this frame
+            # Build the detections list for this frame. We forward _pose_pan/_pose_tilt
+            # under dunder keys so the angle-conversion loop can use each detection's
+            # capture-time pose (eliminates stale-pose targeting drift).
             detections = [
                 {
                     **{k: v for k, v in sd.items() if not k.startswith("_")},
                     "track_id": sd["_id"],
+                    "__pose_pan": sd.get("_pose_pan", servo_pan),
+                    "__pose_tilt": sd.get("_pose_tilt", servo_tilt),
                 }
                 for sd in smoothed_dets
             ]
 
-            # Convert detections to angle-space and check zones
-            current_zones = await get_zones()
-            has_3d_zones = any(z.get("mode") in ("auto_3d", "manual_3d") for z in current_zones)
-            needs_depth = has_3d_zones
+            # Convert detections to angle-space and check zones.
+            #
+            # Two-state pursuit: the controller follows ANY visible cat
+            # (TRACKING) and additionally fires when the tracked cat enters an
+            # exclusion zone (ENGAGING). The selection pass below picks two
+            # targets per frame:
+            #   - engagement_target: cat in a zone, closest to current aim
+            #   - tracking_target:   any cat, closest to current aim
+            # We dispatch to the controller based on which (if any) exist.
+            # Zones rarely change at runtime — only refresh when the version
+            # counter (bumped on every create/update/delete) advances. This
+            # eliminates the per-frame async pool acquire that was costing
+            # ~1-2ms on every iteration even when nothing had changed.
+            current_version = get_zones_version()
+            if current_version != cached_zones_version:
+                cached_zones = await get_zones()
+                cached_zones_version = current_version
+            current_zones = cached_zones
             all_violations = []
             fired = False
             fire_target = None
             direction_delta = None
 
-            # Pick the highest-confidence detection as the primary cat
-            best_det = None
-            best_cat_pan = 0.0
-            best_cat_tilt = 0.0
+            engagement_target = None  # (cat_pan, cat_tilt, zone_name, det, overlap)
+            tracking_target = None    # (cat_pan, cat_tilt, det, bbox_cx, bbox_cy)
+            current_aim_pan = _sweep_controller.current_pan
+            current_aim_tilt = _sweep_controller.current_tilt
+            best_engagement_dist = float("inf")
+            best_tracking_dist = float("inf")
 
             for det in detections:
                 bbox = det["bbox"]
-                pan1, tilt1 = pixel_to_angle(bbox[0], bbox[1], servo_pan, servo_tilt)
-                pan2, tilt2 = pixel_to_angle(bbox[2], bbox[3], servo_pan, servo_tilt)
+                det_pose_pan = det["__pose_pan"]
+                det_pose_tilt = det["__pose_tilt"]
+                pan1, tilt1 = calibrated_pixel_to_angle(bbox[0], bbox[1], det_pose_pan, det_pose_tilt)
+                pan2, tilt2 = calibrated_pixel_to_angle(bbox[2], bbox[3], det_pose_pan, det_pose_tilt)
                 angle_bbox = [pan1, tilt1, pan2, tilt2]
                 cat_pan = (pan1 + pan2) / 2
                 cat_tilt = (tilt1 + tilt2) / 2
 
-                if best_det is None or det["confidence"] > best_det["confidence"]:
-                    best_det = det
-                    best_cat_pan = cat_pan
-                    best_cat_tilt = cat_tilt
+                # Bbox center in normalized [0..1] frame coordinates — used
+                # later for the tracking deadband check (skip the camera
+                # move if the cat is already near frame center).
+                bbox_cx = (bbox[0] + bbox[2]) / 2
+                bbox_cy = (bbox[1] + bbox[3]) / 2
 
-                # Project cat to room-space if depth available
-                cat_room_pos = None
-                if current_depth is not None:
-                    cat_center_x = (bbox[0] + bbox[2]) / 2
-                    cat_center_y = (bbox[1] + bbox[3]) / 2
-                    px = int(cat_center_x * current_depth.shape[1])
-                    py = int(cat_center_y * current_depth.shape[0])
-                    px = max(0, min(px, current_depth.shape[1] - 1))
-                    py = max(0, min(py, current_depth.shape[0] - 1))
-                    rel_depth = float(current_depth[py, px])
-                    if rel_depth > 0:
-                        metric_depth = _depth_estimator.depth_scale / rel_depth
-                        camera_pos = (0.0, 0.0, settings.camera_height_cm)
-                        cat_room_pos = angle_depth_to_room(
-                            cat_pan, cat_tilt, metric_depth, camera_pos
-                        )
-                        cat_id = det.get("cat_name", f"cat_{id(det)}")
-                        _cat_tracker.update_detection(cat_id, cat_room_pos, time.time())
+                clamped_pan = max(
+                    _sweep_controller.pan_min,
+                    min(_sweep_controller.pan_max, cat_pan),
+                )
+                clamped_tilt = max(
+                    _sweep_controller.tilt_min,
+                    min(_sweep_controller.tilt_max, cat_tilt),
+                )
+                dist = (
+                    (clamped_pan - current_aim_pan) ** 2
+                    + (clamped_tilt - current_aim_tilt) ** 2
+                )
 
-                violations = check_zone_violations(angle_bbox, current_zones, cat_room_pos=cat_room_pos)
+                # Every detected cat is a tracking candidate.
+                if dist < best_tracking_dist:
+                    best_tracking_dist = dist
+                    tracking_target = (clamped_pan, clamped_tilt, det, bbox_cx, bbox_cy)
+
+                # Cats inside zones are also engagement candidates.
+                violations = check_zone_violations(angle_bbox, current_zones)
                 all_violations.extend(violations)
+                if violations and dist < best_engagement_dist:
+                    best_engagement_dist = dist
+                    engagement_target = (
+                        clamped_pan,
+                        clamped_tilt,
+                        violations[0]["zone_name"],
+                        det,
+                        violations[0]["overlap"],
+                    )
 
-            # Tell the controller about any detected cat — stops sweep, begins tracking
-            if best_det is not None:
-                _sweep_controller.on_cat_detected(best_cat_pan, best_cat_tilt)
-
-            # Now handle zone violations for the warning/firing flow
-            if all_violations:
-                zone_name = all_violations[0]["zone_name"]
-                v_det = best_det
-
-                _sweep_controller.on_cat_in_zone(best_cat_pan, best_cat_tilt, zone_name)
+            if engagement_target is not None:
+                tgt_pan, tgt_tilt, zone_name, v_det, overlap = engagement_target
+                _sweep_controller.on_cat_in_zone(tgt_pan, tgt_tilt, zone_name)
 
                 if _sweep_controller.should_fire():
-                    bbox = v_det["bbox"]
                     if settings.dev_mode:
                         logger.info(f"DEV ZAP! Cat in {zone_name}")
                         fired = True
+                        bbox = v_det["bbox"]
                         center_x = (bbox[0] + bbox[2]) / 2
                         center_y = (bbox[1] + bbox[3]) / 2
                         fire_target = {"x": center_x, "y": center_y, "zone": zone_name}
                     else:
-                        await _actuator.goto(best_cat_pan, best_cat_tilt)
-                        await asyncio.sleep(0.2)
+                        await _actuator.goto(tgt_pan, tgt_tilt, direct=True)
+                        _last_sent_pan_int = snap_to_servo_step(tgt_pan)
+                        _last_sent_tilt_int = snap_to_servo_step(tgt_tilt)
                         success = await _actuator.fire()
                         fired = success
 
-                    _sweep_controller.on_fire_complete()
+                    _sweep_controller.mark_shot_fired()
+                    _sweep_controller.on_fire_complete(
+                        fired_pan=tgt_pan if not settings.dev_mode else None,
+                        fired_tilt=tgt_tilt if not settings.dev_mode else None,
+                    )
                     asyncio.create_task(_log_event({
                         "type": "ZAP",
                         "cat_name": v_det.get("cat_name"),
                         "zone_name": zone_name,
                         "confidence": v_det["confidence"],
-                        "overlap": all_violations[0]["overlap"],
-                        "servo_pan": best_cat_pan,
-                        "servo_tilt": best_cat_tilt,
+                        "overlap": overlap,
+                        "servo_pan": tgt_pan,
+                        "servo_tilt": tgt_tilt,
                     }))
-            elif best_det is not None:
-                _sweep_controller.on_cat_not_in_zone()
-
-            if not detections:
+            elif tracking_target is not None:
+                tgt_pan, tgt_tilt, _, tgt_cx, tgt_cy = tracking_target
+                # Deadband check: if the cat's bbox center is already inside
+                # the deadband radius around frame center (0.5, 0.5), the rig
+                # is "close enough" — hold position rather than chasing the
+                # last few pixels of YOLO bbox jitter. on_cat_in_deadband
+                # still resets the grace timer so we don't drop back to
+                # SWEEPING while the cat sits centered in front of us.
+                dx = tgt_cx - 0.5
+                dy = tgt_cy - 0.5
+                pixel_dist = (dx * dx + dy * dy) ** 0.5
+                if pixel_dist <= settings.tracking_deadband_frac:
+                    _sweep_controller.on_cat_in_deadband()
+                else:
+                    _sweep_controller.on_cat_detected(tgt_pan, tgt_tilt)
+            else:
                 _sweep_controller.on_no_cat_detected()
 
-            # Direction delta for dev mode arrow
-            if settings.dev_mode and best_det is not None and _sweep_controller.state in (SweepState.WARNING, SweepState.FIRING, SweepState.TRACKING):
-                direction_delta = _sweep_controller.get_direction_delta(best_cat_pan, best_cat_tilt)
+            # Direction delta for dev mode arrow — shown during TRACKING and ENGAGING
+            if settings.dev_mode and _sweep_controller.state in (SweepState.TRACKING, SweepState.ENGAGING):
+                if engagement_target is not None:
+                    dd_pan, dd_tilt, _, _, _ = engagement_target
+                    direction_delta = _sweep_controller.get_direction_delta(dd_pan, dd_tilt)
+                elif tracking_target is not None:
+                    dd_pan, dd_tilt, _, _, _ = tracking_target
+                    direction_delta = _sweep_controller.get_direction_delta(dd_pan, dd_tilt)
 
-            # Tick cat tracker and prune lost entries
-            now_t = time.time()
-            _cat_tracker.tick(now_t)
-            _cat_tracker.cleanup_lost(max_age=60.0, current_time=now_t)
-
-            # Build predicted positions for occluded cats
-            occluded_predictions = []
-            for ocat in _cat_tracker.get_occluded_cats():
-                pred = _cat_tracker.predict_position(ocat.id, now_t)
-                if pred:
-                    occluded_predictions.append({
-                        "id": ocat.id,
-                        "predicted": pred,
-                        "occluded_by": ocat.occluded_by,
-                    })
-
-            # Only encode and broadcast when WebSocket clients are connected
+            # Only encode and broadcast when WebSocket clients are connected.
+            # In production, jpg_bytes already came in from the ESP32-CAM —
+            # we re-emit them verbatim instead of decode→numpy→re-encode,
+            # which was burning ~15-30ms per frame for no reason. Dev mode
+            # uses cv2.VideoCapture (raw numpy), so it still has to encode.
             if has_feed_clients():
-                _, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
-                frame_b64 = base64.b64encode(buffer).decode("utf-8")
+                if jpg_bytes is not None:
+                    frame_b64 = base64.b64encode(jpg_bytes).decode("utf-8")
+                else:
+                    _, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
+                    frame_b64 = base64.b64encode(buffer).decode("utf-8")
 
                 # Only re-encode panorama when tiles have actually changed
                 if _tile_grid._pano_dirty:
                     pano_jpeg = _tile_grid.get_panorama_jpeg()
                     cached_pano_b64 = base64.b64encode(pano_jpeg).decode("utf-8") if pano_jpeg else None
 
+                # Expose the PHYSICAL (servo-snapped) pose to clients, not the
+                # float intent. This is the decoupling boundary: internally we
+                # track continuous float state for precision, but what gets
+                # broadcast to the UI is what the servo has actually achieved.
                 await broadcast_to_clients({
                     "frame": frame_b64,
                     "panorama": cached_pano_b64,
@@ -510,14 +621,21 @@ async def run_vision_loop(app_state: dict):
                     "fired": fired,
                     "fire_target": fire_target,
                     "state": _sweep_controller.state.value,
-                    "servo_pan": servo_pan,
-                    "servo_tilt": servo_tilt,
-                    "warning_remaining": _sweep_controller.get_warning_remaining(),
+                    "servo_pan": snap_to_servo_step(servo_pan),
+                    "servo_tilt": snap_to_servo_step(servo_tilt),
                     "direction_delta": direction_delta,
-                    "occluded_cats": occluded_predictions,
                 })
 
-            await asyncio.sleep(settings.vision_loop_interval)
+            # Sleep only the time we have left in the target frame budget.
+            # The previous unconditional sleep added latency every iteration
+            # regardless of how long the iteration already took, capping the
+            # achievable rate even when the inner work was already slow.
+            elapsed = time.time() - now
+            remaining = settings.vision_loop_interval - elapsed
+            if remaining > 0:
+                await asyncio.sleep(remaining)
+            else:
+                await asyncio.sleep(0)
 
     except asyncio.CancelledError:
         pass
@@ -574,9 +692,10 @@ app.include_router(events.router)
 app.include_router(control.router)
 app.include_router(stream.router)
 app.include_router(settings_router.router)
-app.include_router(spatial.router)
+app.include_router(furniture.router)
 app.include_router(photos_router.router)
 app.include_router(classifier_router.router)
+app.include_router(calibration_router.router)
 
 
 @app.get("/health")

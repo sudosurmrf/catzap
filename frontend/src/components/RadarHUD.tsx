@@ -1,9 +1,8 @@
 import { useEffect, useRef } from "react";
-import type { Detection, OccludedCat } from "../types";
+import type { Detection } from "../types";
 
 interface RadarHUDProps {
   detections: Detection[];
-  occludedCats: OccludedCat[];
   servoPan: number;
   servoTilt: number;
 }
@@ -11,8 +10,6 @@ interface RadarHUDProps {
 const SIZE = 360;
 const HALF = SIZE / 2;
 const DOT_RADIUS = 10;
-const FOV_H = 65;
-const FOV_V = 50;
 const LERP = 0.3;
 const FADE_DURATION_MS = 2000;
 
@@ -37,7 +34,6 @@ function clampToCircle(x: number, y: number): [number, number] {
 
 export default function RadarHUD({
   detections,
-  occludedCats,
   servoPan,
   servoTilt,
 }: RadarHUDProps) {
@@ -46,20 +42,23 @@ export default function RadarHUD({
   const rafRef = useRef<number>(0);
 
   // Store latest props in refs so the animation loop reads current values
-  const propsRef = useRef({ detections, occludedCats, servoPan, servoTilt });
-  propsRef.current = { detections, occludedCats, servoPan, servoTilt };
+  const propsRef = useRef({ detections, servoPan, servoTilt });
+  propsRef.current = { detections, servoPan, servoTilt };
 
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
+    const maybeCtx = canvas.getContext("2d");
+    if (!maybeCtx) return;
+    // Re-bind to a non-nullable local so the nested draw() closure below
+    // doesn't re-widen back to CanvasRenderingContext2D | null.
+    const ctx: CanvasRenderingContext2D = maybeCtx;
 
     let running = true;
 
     function draw() {
       if (!running) return;
-      const { detections, occludedCats, servoPan, servoTilt } = propsRef.current;
+      const { detections } = propsRef.current;
       const now = Date.now();
       const dots = dotsRef.current;
 
@@ -144,22 +143,6 @@ export default function RadarHUD({
         const lx = prev ? prev.x + (rx - prev.x) * LERP : rx;
         const ly = prev ? prev.y + (ry - prev.y) * LERP : ry;
         dots.set(key, { x: lx, y: ly, lastSeen: now, dimmed: false });
-      });
-
-      // Occluded cats: convert absolute angles to frame-relative offset
-      occludedCats.forEach((occ) => {
-        const [pan, tilt] = occ.predicted;
-        const relX = (pan - servoPan) / FOV_H;
-        const relY = (tilt - servoTilt) / FOV_V;
-        const rx = HALF + relX * radarR * 2;
-        const ry = HALF - (0.5 - relY) * radarR;
-        const key = `occ-${occ.id}`;
-        activeKeys.add(key);
-
-        const prev = dots.get(key);
-        const lx = prev ? prev.x + (rx - prev.x) * LERP : rx;
-        const ly = prev ? prev.y + (ry - prev.y) * LERP : ry;
-        dots.set(key, { x: lx, y: ly, lastSeen: now, dimmed: true });
       });
 
       // Draw all dots (active + fading)
