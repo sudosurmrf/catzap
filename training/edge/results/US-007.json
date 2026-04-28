@@ -1,0 +1,17 @@
+{
+  "story_id": "US-007",
+  "model_path": "training/edge/nanodet/checkpoints/nanodet_plus_m_0.5x_pretrained.onnx",
+  "model_format": "pytorch",
+  "map50": 0.703971953971954,
+  "size_bytes": 4793616,
+  "params": 1186417,
+  "flops": 0,
+  "input_hw": [
+    416,
+    416
+  ],
+  "latency_ms_p50": 26.621465003699996,
+  "latency_ms_p95": 28.309159899072256,
+  "val_images": 120,
+  "notes": "DEVIATION: upstream does not publish nanodet-plus-m_0.5x pretrained; using nanodet-plus-m_416 (1.0x at 416) ONNX as nearest-published baseline. See training/edge/nanodet/README.md and training/edge/results/US-007.md."
+}

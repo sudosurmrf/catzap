@@ -56,6 +56,15 @@ training/edge/models/yolov8n_cat_qat.pt
 # onnx2tf-internal calibration sample (auto-downloaded; not part of our PoC).
 calibration_image_sample_data_*.npy
 
+# US-007 NanoDet-Plus pretrained download — regenerable via
+# `training/edge/nanodet/setup_venv.sh` (curl from the upstream release URL,
+# SHA recorded at training/edge/nanodet/checkpoints/SHA256SUMS).
+training/edge/nanodet/checkpoints/*.onnx
+training/edge/nanodet/checkpoints/*.pth
+training/edge/nanodet/checkpoints/*.ckpt
+training/edge/nanodet/upstream/
+training/edge/nanodet/.upstream_commit
+
 # Superpowers
 .superpowers/
 

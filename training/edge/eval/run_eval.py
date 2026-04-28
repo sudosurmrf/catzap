@@ -25,7 +25,25 @@ from .types import EvalResult
 from .val_loader import load_val_set
 
 
+def _is_nanodet_path(model_path: str) -> bool:
+    """Sniff a model path to dispatch to the NanoDet adapter.
+
+    NanoDet checkpoints live under training/edge/nanodet/ (per US-007) and the
+    canonical fine-tune output sits at training/edge/models/nanodet_*.{pth,onnx,tflite}
+    (per US-008/US-009). The eval harness dispatches on path rather than a
+    new --format flag so the PRD-shaped CLI (`--format pytorch`) works for
+    both YOLO and NanoDet checkpoints.
+    """
+    p = model_path.replace("\\", "/")
+    return "training/edge/nanodet/" in p or "/nanodet_" in p or "/nanodet-" in p
+
+
 def _load_adapter(model_path: str, fmt: str, imgsz: int):
+    if _is_nanodet_path(model_path):
+        from .adapters.nanodet_adapter import load
+
+        backend = "onnx" if model_path.lower().endswith(".onnx") else "pytorch"
+        return load(model_path, imgsz=imgsz, backend=backend)
     if fmt == "pytorch":
         from .adapters.pytorch_adapter import load
 
