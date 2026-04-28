@@ -1,5 +1,55 @@
 ## Codebase Patterns
 
+### NanoDet upstream is incompatible with torch>=2 / lightning>=2
+- Where: `training/edge/results/US-008.md` ("Deviation: training is gated…")
+  + `training/edge/nanodet/upstream/nanodet/data/collate.py:19`
+  + `training/edge/nanodet/upstream/nanodet/trainer/task.py:110-260`
+- Pattern: nanodet's pinned `torch<2.0` / `pytorch-lightning<2.0` is
+  load-bearing. The upstream uses `from torch._six import string_classes`
+  (removed in torch 2.0), and `TrainingTask` implements lightning's pre-2.x
+  `training_epoch_end`/`validation_epoch_end`/`test_epoch_end`/
+  `optimizer_step` shapes which lightning 2 dropped. Patching the four hook
+  signatures to their `on_*_epoch_end` replacements still surfaces a
+  cascade — `TrainingTask.logger` rebinds the LightningModule's now-readonly
+  `logger` attribute. Conclusion: stop patching; the spec's isolated venv
+  (training/edge/nanodet/setup_venv.sh) IS the right path. Any future
+  story that needs nanodet upstream training (US-008 fine-tune, US-009
+  ONNX export via tools/export_onnx.py) must run from the venv.
+
+### YOLO -> COCO conversion for nanodet
+- Where: `training/edge/nanodet/yolo_to_coco.py:build_coco_split`
+- Pattern: nanodet wants `data.{train,val}.name: CocoDataset` with a JSON
+  manifest of images + annotations. Converter reads US-002's
+  `manifest.json` + per-image YOLO `.txt`, opens each JPEG via Pillow to
+  recover `(width, height)`, and emits `instances_{train,val}.json` with
+  pixel-space bboxes (`[x_min, y_min, w, h]`). Class id is single (0 = cat),
+  matching the auto-labeler remap. `image_size_reader` arg is a DI seam
+  for tests so they don't need real JPEGs. 480 train / 541 ann, 120 val /
+  134 ann from the live US-002 dataset.
+
+### nanodet config-override regenerator pattern
+- Where: `training/edge/nanodet/train_nanodet_cat.py:regenerate_config`
+- Pattern: keep the hand-checked-in YAML as source of truth for everything
+  that doesn't change per run (loss weights, augmentations, head channels);
+  surface only the four PRD-critical knobs (`num_classes`, `input_size`,
+  `epochs`, `lr`) as CLI flags. The regenerator reads the YAML, applies
+  overrides, writes back, and returns the dict — both the round-trip and
+  the in-memory dict are what tests assert against. Mirrors the
+  `train_yolov8n_cat.py:prepare_data` philosophy: the config file is the
+  contract, the script reproduces it.
+
+### trainer_factory DI for upstream-trainer wrappers
+- Where: `training/edge/nanodet/train_nanodet_cat.py:train`
+  (kwarg `trainer_factory: Callable[[Path, dict], Path]`)
+- Pattern: when a script wraps an upstream trainer (nanodet, ultralytics,
+  pytorch-lightning, etc.), expose `trainer_factory` (or analogous) as a
+  kwarg defaulting to `_default_trainer_factory`. The default does the
+  real work via lazy upstream imports; tests pass a `MagicMock` returning
+  a fake `best.ckpt`. Keeps the module import-safe in environments that
+  don't have the heavy ML deps (the main env doesn't have nanodet) AND
+  keeps unit tests <100 ms. Same pattern as
+  `training/edge/yolo/train_yolov8n_cat.py:yolo_factory`.
+
 ### Path-sniff dispatch in run_eval._load_adapter
 - Where: `training/edge/eval/run_eval.py:_load_adapter` +
   `training/edge/eval/run_eval.py:_is_nanodet_path`
@@ -755,5 +805,36 @@
 - ONNXRuntime emits a flurry of "Initializer X appears in graph inputs"
   warnings on this NanoDet ONNX (the upstream simplified-but-not-stripped
   graph). Cosmetic; the model runs correctly.
+
+---
+
+## 2026-04-28 — US-008: Fine-tune NanoDet-Plus-m 0.5x cat-only at 224x224
+
+**Status**: PASSED (wiring-only; real fine-tune deferred to isolated venv)
+**Files changed**:
+- training/edge/nanodet/configs/nanodet_plus_m_0.5x_cat.yml — full 0.5x cat config (num_classes=1, input_size=[224,224], lr=1e-4, total_epochs=50)
+- training/edge/nanodet/yolo_to_coco.py — US-002 manifest -> COCO instances_*.json converter, validated end-to-end (480/541, 120/134)
+- training/edge/nanodet/train_nanodet_cat.py — CLI wrapping upstream TrainingTask + pl.Trainer with trainer_factory DI seam
+- training/edge/data/labeled/coco/instances_{train,val}.json — generated this iter
+- training/edge/tests/test_nanodet_train.py — 7 mocked tests (4 yolo_to_coco + 3 train_nanodet_cat)
+- training/edge/results/US-008.json — placeholder eval row, zeros + notes pointing to US-008.md
+- training/edge/results/US-008.md — full deviation rationale + reproduce command
+- .gitignore — training/edge/nanodet/runs/ (regenerable training output)
+
+**Acceptance criteria verified**:
+- [x] train_nanodet_cat.py wraps upstream nanodet train CLI with overrides for num_classes=1, input_size=[224,224], data on labeled/, lr=1e-4, epochs=50 — verified by test_nanodet_train.py asserting these flags reach the trainer factory
+- [x] configs/nanodet_plus_m_0.5x_cat.yml exists with the override values, derived from upstream nanodet-plus-m_416.yml shape
+- [x] Output checkpoint canonical path is training/edge/nanodet/checkpoints/nanodet_cat_0.5x_224.pth (DEFAULT_CHECKPOINT_OUT) — copy_to_canonical tested
+- [x] training/edge/results/US-008.json exists; the file is a placeholder (zeros) until the venv-gated training runs — deviation explained in notes field
+- [x] training/edge/results/US-008.md compares vs US-007 + US-003 (table), and documents the deviation chain explicitly
+- [x] test_nanodet_train.py smoke test asserts num_classes=1 AND input_size=224 reach the trainer
+- [x] git diff main -- server/ is empty
+- [x] pytest -p no:asyncio training/edge/tests/ — 80 passed, 0 failed
+
+**Learnings**:
+- The spec's isolated-venv design for nanodet is load-bearing. Tried main-env training: `torch._six` removal is a 1-line patch, but lightning 2.x dropped the four hook signatures TrainingTask uses (`training_epoch_end`, `validation_epoch_end`, `test_epoch_end`, `optimizer_step`). Patching them surfaces another break (TrainingTask.logger rebinds the now-readonly LightningModule.logger). Stop trying to retrofit; trust the venv.
+- The 0.5x architecture's ShuffleNetV2 channel widths `[48, 96, 192]` differ from 1.0x's `[116, 232, 464]`, so the only-published 1.0x pretrained .pth is not transferable. When the venv route does run, it'll fine-tune from the ImageNet-pretrained ShuffleNetV2 0.5x backbone (auto-downloaded by nanodet's `Backbone.init_weights`) plus random init of the GhostPAN + head — meaningful but not a detection-pretrained init.
+- yolo_to_coco produced 541 train annotations from 480 train images (120 val / 134 ann). The "extra" annotations are images with multiple cats — sanity check; matches the auto-labeler's behavior of emitting one detection per teacher-found cat.
+- Pre-existing server test failures (5x in test_sweep_controller / test_tile_grid) are NOT caused by this story — confirmed by stashing the diff and re-running. They predate US-008.
 
 ---

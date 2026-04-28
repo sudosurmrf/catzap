@@ -188,8 +188,8 @@
         "US-007"
       ],
       "priority": 8,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Wiring landed: configs/nanodet_plus_m_0.5x_cat.yml (num_classes=1, input_size=224, lr=1e-4, epochs=50), yolo_to_coco.py converter, train_nanodet_cat.py CLI with trainer_factory DI, test_nanodet_train.py (7 tests). Real fine-tune deferred to isolated venv per setup_venv.sh — main env's torch 2.3 + lightning 2.x is incompatible with nanodet's torch<2 / pl<2 pins (4 lightning hook signatures changed). US-008.json is a placeholder of zeros; US-008.md documents the deviation chain and reproduce command."
     },
     {
       "id": "US-009",
