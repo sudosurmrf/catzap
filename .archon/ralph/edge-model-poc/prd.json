@@ -119,8 +119,8 @@
         "US-004"
       ],
       "priority": 5,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented in iteration 5. Files: training/edge/yolo/qat_finetune.py (decide() reads US-003+US-004 JSONs and computes mAP_drop in mAP-points; orchestrate() branches to write_skipped_result() or qat_one_epoch -> export_qat_to_int8_tflite -> run_eval_on_qat); training/edge/tests/test_qat_decision.py (10 tests, parametrized over both branches + missing-file + skipped-schema + DI-mocked train/export/eval); training/edge/results/US-005.{json,md}; training/edge/models/yolov8n_cat_qat.pt (gitignored, 6.2 MB) + yolov8n_cat_qat_int8.tflite (3.07 MB, gitignored). Computed mAP_drop = 90.9 points (US-003 0.909 - US-004 0.000) >> 3.0, so QAT executed. prepare_qat succeeded with fake_quant_inserted=True after flipping model.model.train(). 1 epoch GPU @ lr=1e-4 + identical PTQ export -> mAP=0.0 (no recovery, as expected: US-004 failure mode is per-tensor activation quant on the monolithic Detect output, which QAT cannot fix without a Detect-head split that's out of scope). 45 pytest passing (35 + 10), server/ untouched."
     },
     {
       "id": "US-006",

@@ -47,6 +47,12 @@ training/edge/models/*.tflite
 training/edge/models/*.tflite.export.json
 training/edge/models/*_saved_model/
 
+# US-005 QAT intermediate checkpoint — regenerable via
+# `python -m training.edge.yolo.qat_finetune`. The downstream artifact
+# US-011 actually consumes is the .tflite (also gitignored), so the .pt
+# is purely intermediate.
+training/edge/models/yolov8n_cat_qat.pt
+
 # onnx2tf-internal calibration sample (auto-downloaded; not part of our PoC).
 calibration_image_sample_data_*.npy
 
