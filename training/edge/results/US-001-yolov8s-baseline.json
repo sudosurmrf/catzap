@@ -1,0 +1,17 @@
+{
+  "story_id": "US-001-yolov8s-baseline",
+  "model_path": "yolov8s.pt",
+  "model_format": "pytorch",
+  "map50": 1.0000000000000002,
+  "size_bytes": 22573363,
+  "params": 11166560,
+  "flops": 57633689600,
+  "input_hw": [
+    1280,
+    1280
+  ],
+  "latency_ms_p50": 10.639161497238092,
+  "latency_ms_p95": 12.109780189348385,
+  "val_images": 22,
+  "notes": "yolov8s stock COCO baseline @ 1280px (silver GT was self-generated)"
+}

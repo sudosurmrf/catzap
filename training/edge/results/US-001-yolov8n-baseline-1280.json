@@ -1,0 +1,17 @@
+{
+  "story_id": "US-001-yolov8n-baseline-1280",
+  "model_path": "yolov8n.pt",
+  "model_format": "pytorch",
+  "map50": 0.8661683144441766,
+  "size_bytes": 6534387,
+  "params": 3157200,
+  "flops": 17715097600,
+  "input_hw": [
+    1280,
+    1280
+  ],
+  "latency_ms_p50": 9.28215350722894,
+  "latency_ms_p95": 10.70037185709225,
+  "val_images": 22,
+  "notes": "yolov8n stock COCO checkpoint @ 1280px on silver val"
+}

@@ -1,0 +1,23 @@
+# image_path	label_path (both relative to this manifest's directory)
+../../../../data/cat_photos/1cff6f15-6106-4810-a3e7-15a64dd320ea/1d4c77c8-6a8b-498b-8d4e-5cf622623f7e.jpg	labels/1d4c77c8-6a8b-498b-8d4e-5cf622623f7e.txt
+../../../../data/cat_photos/1cff6f15-6106-4810-a3e7-15a64dd320ea/418cdb8b-9ce7-48e6-af46-7e73f9c17057.jpg	labels/418cdb8b-9ce7-48e6-af46-7e73f9c17057.txt
+../../../../data/cat_photos/1cff6f15-6106-4810-a3e7-15a64dd320ea/8bdec96e-400b-4bb0-8395-02a06c68d8a1.jpg	labels/8bdec96e-400b-4bb0-8395-02a06c68d8a1.txt
+../../../../data/cat_photos/1cff6f15-6106-4810-a3e7-15a64dd320ea/c853be60-9c78-42ec-8409-2d9d26d6095c.jpg	labels/c853be60-9c78-42ec-8409-2d9d26d6095c.txt
+../../../../data/cat_photos/1cff6f15-6106-4810-a3e7-15a64dd320ea/d3746f38-38d7-40e6-a138-8ce8e141dc5c.jpg	labels/d3746f38-38d7-40e6-a138-8ce8e141dc5c.txt
+../../../../data/cat_photos/1cff6f15-6106-4810-a3e7-15a64dd320ea/f29a7a96-9b13-4d4c-ab8e-9f8bd639415b.jpg	labels/f29a7a96-9b13-4d4c-ab8e-9f8bd639415b.txt
+../../../../data/cat_photos/7044a799-2a8e-47a9-badb-0a418c23c12f/2056547c-6a4b-4351-9b4d-380fa2e2070c.jpg	labels/2056547c-6a4b-4351-9b4d-380fa2e2070c.txt
+../../../../data/cat_photos/7044a799-2a8e-47a9-badb-0a418c23c12f/311fdbb9-476d-40b9-91cf-d182c61fca8d.jpg	labels/311fdbb9-476d-40b9-91cf-d182c61fca8d.txt
+../../../../data/cat_photos/7044a799-2a8e-47a9-badb-0a418c23c12f/3168d727-cca1-45c0-b7a6-fdd311f81e79.jpg	labels/3168d727-cca1-45c0-b7a6-fdd311f81e79.txt
+../../../../data/cat_photos/7044a799-2a8e-47a9-badb-0a418c23c12f/bed4f2eb-c04f-460d-b5b8-ed4813d4635b.jpg	labels/bed4f2eb-c04f-460d-b5b8-ed4813d4635b.txt
+../../../../data/cat_photos/7044a799-2a8e-47a9-badb-0a418c23c12f/ee2a30e1-ad72-46b5-a9c4-dfb29b24dd90.jpg	labels/ee2a30e1-ad72-46b5-a9c4-dfb29b24dd90.txt
+../../../../data/cat_photos/9cbf920e-5a4d-4b6f-8499-7adedaa4cc85/0be5b384-5166-4b82-9dc9-64bad2862675.jpg	labels/0be5b384-5166-4b82-9dc9-64bad2862675.txt
+../../../../data/cat_photos/9cbf920e-5a4d-4b6f-8499-7adedaa4cc85/4316b866-3a6d-4498-8f72-5b98e014bbdb.jpg	labels/4316b866-3a6d-4498-8f72-5b98e014bbdb.txt
+../../../../data/cat_photos/9cbf920e-5a4d-4b6f-8499-7adedaa4cc85/6d6640ef-d06b-4d36-9fca-40f1c0cc5f85.jpg	labels/6d6640ef-d06b-4d36-9fca-40f1c0cc5f85.txt
+../../../../data/cat_photos/9cbf920e-5a4d-4b6f-8499-7adedaa4cc85/7d539ec3-ed82-42ad-b3d5-620b5d71714e.jpg	labels/7d539ec3-ed82-42ad-b3d5-620b5d71714e.txt
+../../../../data/cat_photos/9cbf920e-5a4d-4b6f-8499-7adedaa4cc85/8afcbb17-6366-4e77-b745-b99f33395965.jpg	labels/8afcbb17-6366-4e77-b745-b99f33395965.txt
+../../../../data/cat_photos/9cbf920e-5a4d-4b6f-8499-7adedaa4cc85/beb01a9d-e6be-41b7-ac51-41cd0748b585.jpg	labels/beb01a9d-e6be-41b7-ac51-41cd0748b585.txt
+../../../../data/cat_photos/a923c2b3-0e35-4099-b377-ebb955c7f746/3e488dc4-d3d5-4612-b28b-a6dbeb458920.jpg	labels/3e488dc4-d3d5-4612-b28b-a6dbeb458920.txt
+../../../../data/cat_photos/a923c2b3-0e35-4099-b377-ebb955c7f746/40aab9c4-9d01-41c2-a3f3-5395f0627349.jpg	labels/40aab9c4-9d01-41c2-a3f3-5395f0627349.txt
+../../../../data/cat_photos/a923c2b3-0e35-4099-b377-ebb955c7f746/5eb5428a-371b-4b37-b33d-ecae210b45bb.jpg	labels/5eb5428a-371b-4b37-b33d-ecae210b45bb.txt
+../../../../data/cat_photos/a923c2b3-0e35-4099-b377-ebb955c7f746/83f9e6ea-27f5-46cf-bba2-1da47e59ff89.jpg	labels/83f9e6ea-27f5-46cf-bba2-1da47e59ff89.txt
+../../../../data/cat_photos/a923c2b3-0e35-4099-b377-ebb955c7f746/8788929c-bc2b-4b55-9c8f-4198a94555e8.jpg	labels/8788929c-bc2b-4b55-9c8f-4198a94555e8.txt
