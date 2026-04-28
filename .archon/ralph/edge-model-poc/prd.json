@@ -142,8 +142,8 @@
         "US-004"
       ],
       "priority": 6,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented in iteration 6. Files: training/edge/yolo/distill_train.py (KL-style BCE distill on cat-channel, alpha=0.5 T=4.0, single_cls=True, DI hooks for yolo_factory/patch_fn/export_fn) + tests/test_distill.py (15 cases incl. teacher-detached / student-flow gradient invariants) + results/{US-006-fp32,US-006-int8}.json + results/US-006.md (4-row table) + models/yolov8n_cat_distilled.pt. Distilled fp32 mAP=1.000 (vs US-003's 0.909); distilled int8 PTQ mAP=0.205 \u2014 first non-zero YOLOv8 PTQ in the PoC, recovers 20.5 mAP-points from US-004's 0.000. INT8 size 3.07 MB, p50 latency 3.72 ms (\u2248 US-004). server/ untouched; 60/60 edge tests pass."
     },
     {
       "id": "US-007",

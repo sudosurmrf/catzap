@@ -1,5 +1,50 @@
 ## Codebase Patterns
 
+### KD as cls-quantization-recovery lever (PTQ collapse partial fix)
+- Where: `training/edge/yolo/distill_train.py` + `training/edge/results/US-006.md`
+- Pattern: Where US-004's PTQ produced mAP=0 and US-005's QAT couldn't
+  recover (per-tensor activation scale dominated by xywh), KD produces a
+  student whose cat-channel logits are pre-shaped by the teacher's
+  calibrated cls magnitudes. The post-PTQ output tensor's per-tensor scale
+  no longer crushes cls into a single int8 bucket. Result: 0.000 → 0.205
+  mAP under the IDENTICAL US-004 PTQ pipeline (same calibration set, same
+  TFLiteConverter settings). Not a full recovery but the first non-zero
+  YOLOv8 PTQ in the PoC; the next move (out of scope here) is splitting
+  Detect head into separate cls/xywh output tensors so each gets its own
+  per-tensor scale.
+
+### Inject loss patch via on_train_start callback (avoid trainer subclass)
+- Where: `training/edge/yolo/distill_train.py:train_distilled`
+- Pattern: ultralytics' `model.train()` opens its own trainer wrapping
+  `model.model`. To swap `model.model.loss` AFTER the trainer has placed
+  it on the right device, register an `on_train_start` callback via
+  `model.add_callback('on_train_start', fn)` and do the patch inside the
+  callback (where `trainer.model` is the live device-resident copy). Same
+  hook avoids subclassing DetectionTrainer or touching ultralytics'
+  internals. Used here for KD; reusable for any loss-modification hack.
+
+### YOLOv8 monkey-patch model.loss for KD without double-forward
+- Where: `training/edge/yolo/distill_train.py:patch_student_loss_for_distill`
+- Pattern: ultralytics' `BaseModel.loss(batch, preds=None)` computes
+  `preds = self.forward(batch['img']) if preds is None else preds`. So a
+  patched loss that computes student preds ONCE and passes them via
+  `original_loss(batch, preds=s_features)` avoids running the student
+  forward twice per step. Saves ~33% of training wall-clock vs naively
+  re-forwarding inside the patched loss. Capture `original_loss = student.loss`
+  BEFORE assigning the new closure; bound-method reference stays valid.
+
+### Detect head channel layout: [4*reg_max box-DFL, nc cls]
+- Where: `ultralytics.nn.modules.head.Detect.forward` — referenced in
+  `training/edge/yolo/distill_train.py:_slice_cat_logits`
+- Pattern: in TRAINING mode, ultralytics' Detect head returns a list of
+  per-scale tensors (B, 4*reg_max + nc, H, W). The first 4*reg_max=64
+  channels are the box-DFL distribution; remaining nc are cls logits. To
+  align cat across architectures: student (single_cls, nc=1) → cls idx 0
+  i.e. tensor[:, 64:65, :, :]; teacher (yolov8s, nc=80) → cls idx 15
+  (COCO_CAT_CLASS) i.e. tensor[:, 64+15:64+16, :, :]. Both yolov8n and
+  yolov8s share strides (8/16/32) so spatial grids match for any common
+  imgsz — no resampling needed for elementwise distillation losses.
+
 ### prepare_qat asserts training mode — flip before call
 - Where: `training/edge/yolo/qat_finetune.py:qat_one_epoch`
 - Pattern: `torch.ao.quantization.prepare_qat(module, inplace=True)` raises
@@ -512,5 +557,89 @@
   the result object's .write(p) must actually create the file at p so
   the orchestrator's "did US-005.json get written?" check holds. Tests
   use `side_effect=lambda p: Path(p).write_text(...)` to honor this.
+
+---
+
+## 2026-04-28 — US-006: Knowledge distillation YOLOv8s teacher -> YOLOv8n student (cat-only)
+
+**Status**: PASSED
+**Files changed**:
+- training/edge/yolo/distill_train.py — compute_distill_loss (per-scale BCE
+  with T**2 scaling, cat-channel slicing) + combined_loss (sup + alpha*distill)
+  + patch_student_loss_for_distill (monkey-patches student.model.loss without
+  double-forward) + train_distilled (registers on_train_start callback to do
+  the patch on the trainer's device-resident model) + quantize_distilled
+  (delegates to export_quantize.export_and_quantize). DI hooks on every
+  heavy step (yolo_factory, patch_fn, export_fn).
+- training/edge/tests/test_distill.py — 15 mocked pytest cases
+- training/edge/models/yolov8n_cat_distilled.pt — canonical fp32 (6.2 MB)
+- training/edge/results/US-006-fp32.json — distilled fp32 mAP=1.000,
+  latency p50=5.42 ms, params=3,011,043 (same as US-003 — single_cls)
+- training/edge/results/US-006-int8.json — distilled int8 PTQ mAP=0.205,
+  latency p50=3.72 ms, size=3,220,840 bytes (same as US-004)
+- training/edge/results/US-006.md — 4-row decision-matrix-ready table +
+  KD-vs-PTQ analysis explaining why distillation helped where QAT didn't
+
+**Acceptance criteria verified**:
+- [x] training/edge/yolo/distill_train.py loads yolov8s.pt as frozen teacher,
+      yolov8n.pt as student, runs custom training with combined loss
+      = standard YOLO loss + alpha * distillation_loss(student, teacher).
+      Default alpha=0.5 documented in module + CLI + US-006.md.
+- [x] Output training/edge/models/yolov8n_cat_distilled.pt (6.2 MB),
+      then quantizes via training.edge.yolo.export_quantize.export_and_quantize
+      to training/edge/models/yolov8n_cat_distilled_int8.tflite (3.07 MB).
+- [x] Eval harness ran on both fp32 and int8 distilled checkpoints;
+      training/edge/results/US-006-fp32.json and US-006-int8.json written.
+- [x] training/edge/results/US-006.md: 4-row comparison table (US-003 fp32,
+      US-004 int8, US-006 fp32 distilled, US-006 int8 distilled) with
+      mAP, size, latency.
+- [x] training/edge/tests/test_distill.py: 15 cases. Required core test
+      (combined loss = sup + alpha*distill, teacher gradient detached,
+      student gradient flows on every scale) is the first three tests.
+- [x] git diff main -- server/ is empty (0 lines).
+- [x] CatDetector import smoke test passes.
+- [x] pytest -p no:asyncio training/edge/tests/ — 60 passed (45 + 15).
+
+**Learnings**:
+- KD is the ONLY recovery lever that worked for YOLOv8 PTQ in this PoC.
+  US-004 (PTQ) → 0.000 mAP; US-005 (QAT) → 0.000 mAP; US-006 (KD+PTQ) →
+  0.205 mAP. The fp32 weights are pre-shaped by the teacher's cat-channel
+  logit magnitudes such that the post-PTQ per-tensor scale on the
+  monolithic Detect output no longer crushes cls into one int8 bucket.
+  The mechanism is structural — KD doesn't change the architecture; it
+  changes the activation distribution that the calibrator sees.
+- Distilled fp32 mAP went from US-003's 0.909 to 1.000 — saturated on the
+  120-image val. The val is small enough that 1.000 is plausible but not
+  meaningfully different from "near-perfect"; cite it as evidence the
+  distillation didn't hurt training.
+- Channel alignment was the trickiest design decision: student is
+  single_cls (nc=1) but teacher is COCO (nc=80). Distilling on softmax
+  across classes is degenerate for the student. Settled on per-channel
+  binary KD — slice teacher's cat (idx 15) and student's class-0,
+  match via temperature-scaled BCE. T**2 scaling is the Hinton
+  prescription so the gradient magnitude is invariant to T at small
+  logits.
+- Patch-via-callback (`on_train_start`) is cleaner than subclassing
+  DetectionTrainer. The trainer hands us the device-resident model at
+  callback time; that's the right point to swap `model.loss`. The same
+  pattern would work for any loss modification (regularization, KD,
+  consistency losses).
+- Captured a real subtlety: when the trainer calls
+  `self.loss, self.loss_items = self.model(batch_dict)`, the
+  BaseModel.forward dispatches to self.loss(batch). Our patched loss
+  computes student preds ONCE and passes them via the original
+  bound-method `original_loss(batch, preds=s_features)`. Without that,
+  the student forward runs twice per training step (~33% overhead).
+- Out of scope but worth recording for US-012 follow-ups: the remaining
+  79.5 mAP-point PTQ gap is structural — Detect head emits cls + xywh
+  on a single output tensor sharing one per-tensor scale. Splitting the
+  head into separate output tensors (which ultralytics does for its
+  built-in tflite export when `int8=True` is passed) is the obvious
+  next step. KD + head-split is the combination that the literature
+  suggests would close the gap.
+- Wall-clock: 50 epochs on 480 train / 120 val @ batch=32, imgsz=224 on
+  a single RTX 4090 took ~75s. That's negligibly slower than US-003's
+  plain fine-tune (~70s) — the teacher's frozen forward is cheap at
+  yolov8s scale, single-forward patching keeps the overhead near zero.
 
 ---
