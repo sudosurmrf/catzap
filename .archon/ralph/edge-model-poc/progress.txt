@@ -1,5 +1,23 @@
 ## Codebase Patterns
 
+### Decision-matrix aggregator: ROW_SPECS + dual-source ingestion
+- Where: `training/edge/results/aggregate_summary.py:ROW_SPECS` +
+  `_build_row` + `format_decision_matrix` + `format_recommendation`
+- Pattern: when aggregating per-story results into one report, define
+  matrix rows as a static `RowSpec(label, eval_json, tflm_json,
+  optional)` tuple instead of glob-walking — order is part of the spec
+  and required vs. optional rows must be distinguishable. Each row is
+  built from up to two source JSONs (EvalResult shape from
+  `training/edge/eval/types.py` for accuracy/size/host-CPU latency,
+  TFLM shape from `firmware/edge-bench/run_bench.py:report_to_result`
+  for arena/predicted_s3_fps/tflm_compatible). The TFLM side is pulled
+  through `firmware/edge-bench/aggregate.py:aggregate_row` rather than
+  re-parsed locally — single source of truth for the bench-JSON shape.
+  Optional rows (e.g. QAT only present if PTQ mAP_drop > 3) are
+  silently skipped; required rows missing land in `result.missing` so
+  the report can flag them instead of silently rendering an
+  incomplete matrix.
+
 ### US-011 aggregator is the US-012 ingestion seam
 - Where: `firmware/edge-bench/aggregate.py:aggregate_us011_jsons` +
   `:format_comparison_table` + `training/edge/tests/test_us011_aggregate.py`
@@ -1182,5 +1200,67 @@ sequence (`setup_venv.sh && train_nanodet_cat.py && export_quantize.py
   will ingest. Keeping the offending-op surfacing path tested even
   though no real model triggers it means US-012 doesn't need to worry
   about the failure path.
+
+---
+
+## 2026-04-28 — US-012: Final SUMMARY.md decision matrix + recommendation
+
+**Status**: PASSED
+**Files changed**:
+- `training/edge/results/aggregate_summary.py` — new; walks per-story
+  EvalResult JSONs and US-011 TFLM bench JSONs and renders SUMMARY.md
+  via `format_decision_matrix` + `format_recommendation`. ROW_SPECS is
+  the static six-row matrix order; `_pick_winner` excludes fp32 +
+  TFLM-incompatible + zero-mAP rows then tie-breaks on (mAP desc,
+  fps desc, size asc); falls back to smallest arena if every INT8 row
+  collapsed.
+- `training/edge/tests/test_summary_aggregate.py` — new; 12 tests,
+  fixture-driven with `_seed_full_fixture(tmp_path)` writing the full
+  six-row PRD-spec'd set.
+- `training/edge/results/SUMMARY.md` — new; generated artifact, not
+  hand-written. Re-run `python training/edge/results/aggregate_summary.py`
+  to refresh.
+- `training/edge/results/US-012.md` — new; regen instructions + honest
+  framing of the matrix's current numbers.
+
+**Acceptance criteria verified**:
+- [x] SUMMARY.md decision matrix has six rows in PRD order with all seven
+      columns.
+- [x] aggregate_summary.py is a CLI that reads results/*.json and writes
+      SUMMARY.md.
+- [x] Recommendation paragraph addresses (a)-(e) — verified by
+      `test_recommendation_addresses_all_prd_items` and inspection.
+- [x] `pytest training/edge/tests/`: 124 passed (1 warning, no fails)
+      under `-p no:asyncio` (pytest-asyncio Package.obj bug is
+      pre-existing — see test_summary_aggregate test run).
+- [x] `git diff main -- server/`: empty (verified).
+- [x] `python -c "from server.vision.detector import CatDetector"`:
+      passes.
+- [x] `training/edge/tests/test_summary_aggregate.py`: present + green.
+- [x] PR creation deferred per global-system-guidance: do NOT push
+      without explicit user request. Branch `archon/thread-d80faf36`
+      carries the full PoC + this story's commit.
+
+**Learnings**:
+- The pytest-asyncio plugin (v0.23.0) collides with the pytest 8.2 +
+  pluggy 1.6 combo on `Package.obj` during collectstart. Workaround:
+  run with `-p no:asyncio`; sync tests in `training/edge/tests/` are
+  unaffected. The 5 failures previously reported on `server/tests/`
+  under that workaround are async tests that legitimately need the
+  asyncio plugin to run — not regressions from US-012. Document this
+  before any future iteration second-guesses the test count.
+- The aggregator is intentionally hard-coded to ROW_SPECS rather than
+  dynamic glob-walking. Reason: the PRD spells out a specific six-row
+  order and the matrix has to render even when an upstream row is
+  missing (so we can flag it in `result.missing`). Glob-walking would
+  produce a deterministic-but-wrong order on filesystems that sort
+  lexicographically vs. by inode order; static spec is the right call.
+- `_pick_winner`'s tie-break order (mAP desc, fps desc, size asc) plus
+  the zero-mAP exclusion produced the expected pick on this PoC's
+  current numbers (KD INT8 = only nonzero-mAP INT8 row). The fallback
+  branch (smallest arena when every INT8 row is zero) is exercised by
+  `test_recommendation_handles_no_int8_winner` — it doesn't run on the
+  current real data but it's the safety net for future iterations
+  where the export pipeline regresses across all candidates.
 
 ---

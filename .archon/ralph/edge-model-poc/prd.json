@@ -290,8 +290,8 @@
         "US-011"
       ],
       "priority": 12,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented in iteration 12. Files: training/edge/results/aggregate_summary.py, training/edge/results/SUMMARY.md, training/edge/results/US-012.md, training/edge/tests/test_summary_aggregate.py."
     }
   ]
 }
