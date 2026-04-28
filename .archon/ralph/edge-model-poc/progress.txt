@@ -1,5 +1,29 @@
 ## Codebase Patterns
 
+### US-011 aggregator is the US-012 ingestion seam
+- Where: `firmware/edge-bench/aggregate.py:aggregate_us011_jsons` +
+  `:format_comparison_table` + `training/edge/tests/test_us011_aggregate.py`
+- Pattern: don't re-parse `run_bench.report_to_result`'s on-disk JSON
+  shape from US-012; call `aggregate.aggregate_us011_jsons([...])` to get
+  rows (`model`, `size_bytes`, `arena_used_bytes`, `top3_ops`,
+  `raw_x86_us_p50`, `predicted_s3_us_p50`, `predicted_s3_fps`,
+  `tflm_compatible`, `offending_ops`) and `format_comparison_table(rows)`
+  for the markdown rendering. Row order preserved from input. Model name
+  derived from filename (`US-011-yolov8n-tflm.json` -> `yolov8n`,
+  `US-011-yolov8n-qat-tflm.json` -> `yolov8n-qat`). Sets the contract
+  US-012's `aggregate_summary.py` fills in.
+
+### TFLM-incompatible models stay in the table, never silently dropped
+- Where: `firmware/edge-bench/aggregate.py:aggregate_row` +
+  `_fmt_compat` + `test_tflm_incompatible_row_is_kept_with_offending_ops_and_tag`
+- Pattern: a model whose `tflm_compatible` is false MUST still appear in
+  the comparison table — failure is itself a finding the user needs to
+  see. Each unsupported op carries `unsupported: true` in its
+  `op_breakdown` row; the aggregator pulls those into `offending_ops` and
+  the formatter renders the compat cell as `no (CUSTOM_NMS, ...)`. PRD
+  US-011 acceptance: "Do not silently exclude it — the failure itself is
+  a finding."
+
 ### TFLM x86 build: gen path is `linux_x86_64_default_gcc` on current main
 - Where: `firmware/edge-bench/build.sh` (gen-path sniff loop) +
   `firmware/edge-bench/Makefile.bench` (`GEN_DIR ?= ...`)
@@ -1068,5 +1092,95 @@ sequence (`setup_venv.sh && train_nanodet_cat.py && export_quantize.py
 - `MicroProfilerInterface` is the right extension point for per-op
   timing aggregation; the bundled `MicroProfiler` keeps its events_
   array private so subclassing the interface is the only path.
+
+---
+
+## 2026-04-28 — US-011: Run TFLM emulator on quantized YOLOv8n-cat and NanoDet-cat
+
+**Status**: PASSED
+**Files changed**:
+- `firmware/edge-bench/aggregate.py` (new) — `aggregate_us011_jsons()`,
+  `aggregate_row()`, `format_comparison_table()`, `_model_name_from_path()`.
+  US-012-ingestable schema.
+- `training/edge/tests/test_us011_aggregate.py` (new) — 10 parametrized
+  cases: order preservation, 4-way model-name derivation, top-3
+  descending sort, fps-vs-us consistency, TFLM-incompatible row retention
+  with `offending_ops` propagation + markdown rendering, full markdown
+  column contract, empty-op-breakdown safety.
+- `training/edge/results/US-011-yolov8n-tflm.json` (new) — baseline INT8
+  bench (size 3,220,840 / arena 692,816 / x86_p50 1,181,854 us /
+  predicted_s3_p50 9,454,832 us / fps 0.106).
+- `training/edge/results/US-011-yolov8n-qat-tflm.json` (new) — QAT INT8
+  bench (within ~5 ms of baseline at p50).
+- `training/edge/results/US-011-yolov8n-distilled-tflm.json` (new) —
+  distilled INT8 bench (within ~5 ms of baseline at p50).
+- `training/edge/results/US-011-nanodet-tflm.json` (new) — NanoDet INT8
+  bench (size 1,613,072 / arena 2,253,792 / x86_p50 1,834,548 us /
+  predicted_s3_p50 14,676,384 us / fps 0.068).
+- `training/edge/results/US-011.md` (new) — side-by-side comparison
+  table, multiplier rationale (8.0x median of three citations),
+  knock-on findings + recommendations for US-012.
+
+**Acceptance criteria verified**:
+- [x] yolov8n + nanodet + qat + distilled bench JSONs exist with `--runs 50`
+  on the canonical INT8 .tflite paths produced by US-004 / US-005 / US-006 /
+  US-009.
+- [x] US-011.md side-by-side comparison table with required columns
+  (model, size, arena_bytes, top-3-ops-by-time, x86_us_p50,
+  predicted_s3_us_p50, predicted_s3_fps, tflm_compatible).
+- [x] All four models load tflm_compatible=true; PRD's TFLM-incompatible
+  failure mode codified in aggregate.py + tested via fixture but not
+  triggered by real artifacts.
+- [x] Parametrized aggregator tests in
+  `training/edge/tests/test_us011_aggregate.py` — 10 pass.
+- [x] git diff main -- server/ is empty (0 lines).
+- [x] CatDetector import smoke test passes.
+- [x] pytest -p no:asyncio training/edge/tests/ — 112 passed (102 + 10).
+
+**Real measured numbers**:
+  yolov8n  INT8  size=3.22 MB  arena=677 KB   x86_p50=1182 ms  pred_s3_p50=9.45 s  fps=0.106
+  yolov8n-qat       (same size+arena)         x86_p50=1182 ms  pred_s3_p50=9.46 s  fps=0.106
+  yolov8n-distilled (same size+arena)         x86_p50=1177 ms  pred_s3_p50=9.41 s  fps=0.106
+  nanodet  INT8  size=1.61 MB  arena=2.20 MB  x86_p50=1835 ms  pred_s3_p50=14.7 s  fps=0.068
+
+**Learnings**:
+- All four candidates loaded cleanly under TFLM's ~80 builtin op resolver
+  with no unsupported-op surprises. The PRD warned about Detect-head NMS
+  / GFL post-processing tripping TFLM, but both ultralytics' onnx2tf
+  pipeline and nanodet's tools/export_onnx emit only the network forward
+  pass — NMS + box decoding are post-processed on the host (Python here;
+  C on the S3 later). The "TFLM-incompatible" code path in aggregate.py
+  exists but isn't exercised by real artifacts in this PoC.
+- yolov8n PTQ / QAT / distilled benchmark within 5 ms p50 of each other
+  because they share the same export pipeline + identical Detect-head
+  shape. The TFLM bench cannot distinguish among them on speed; mAP
+  (US-004 0.000 / US-005 0.000 / US-006 0.205) is the only discriminator
+  US-012 can use to pick a winner from this family.
+- nanodet uses 3.3x the arena (2.20 MB vs 677 KB) and is 1.55x slower
+  at p50 despite being half the file size. The arena is dominated by
+  larger-input feature maps (US-009 deviation: 416x416 symlink to the
+  pretrained 1.0x .pth, not 224x224 0.5x). When US-008's venv-gated
+  fine-tune produces the real 224x224 0.5x .tflite, expect arena to
+  drop substantially — re-run US-011 then.
+- CONV_2D dominates 88-93% of inference time on both architectures.
+  Whatever ESP32-S3 optimization we eventually bring (ESP-DL vector
+  instructions, INT8 SIMD), it has to target conv. LOGISTIC at 6.6%
+  on yolov8n is unexpectedly costly — likely a single-output-tensor
+  artifact applied across all 1029 anchors that ESP-DL cannot vectorize
+  as efficiently as conv.
+- Predicted S3 fps under the 8x multiplier is well below the PRD's
+  5-fps success target (yolov8n 0.106 fps, nanodet 0.068 fps). Even at
+  the optimistic ~3x with ESP-DL acceleration (effective multiplier
+  ~2.7x), yolov8n hits ~0.31 fps and nanodet ~0.20 fps. US-012 will
+  have to address this honestly — either reduce input size further
+  (160 / 192) or accept low-fps detection for the catzap rig (where
+  cats sit still for minutes at a time).
+- All four models fit comfortably within 8 MB PSRAM (worst case nanodet
+  2.2 MB), so the PRD's "predicted ESP32-S3 tensor arena <= 4 MB"
+  metric is met by every candidate.
+- The aggregator emits the dict shape US-012's aggregate_summary.py
+  will ingest. Keeping the offending-op surfacing path tested even
+  though no real model triggers it means US-012 doesn't need to worry
+  about the failure path.
 
 ---

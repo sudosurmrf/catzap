@@ -257,8 +257,8 @@
         "US-010"
       ],
       "priority": 11,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented in this iteration. Files: firmware/edge-bench/aggregate.py, training/edge/tests/test_us011_aggregate.py (10 parametrized cases), training/edge/results/US-011-{yolov8n,yolov8n-qat,yolov8n-distilled,nanodet}-tflm.json, training/edge/results/US-011.md. All four INT8 candidates load tflm_compatible=true; predicted S3 fps below 5 for both architectures under the 8x multiplier (yolov8n ~0.106 fps, nanodet ~0.068 fps); arena_used 692,816 B (yolov8n family) / 2,253,792 B (nanodet) \u2014 both fit 8 MB PSRAM."
     },
     {
       "id": "US-012",
