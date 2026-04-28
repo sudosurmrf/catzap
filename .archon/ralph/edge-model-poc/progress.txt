@@ -1,0 +1,90 @@
+## Codebase Patterns
+
+### Detector predict() contract
+- Where: `server/vision/detector.py:7-40` (`CatDetector.detect`)
+- Pattern: every model wrapper exposes
+  `predict(frame: np.ndarray) -> list[{"bbox": [x1,y1,x2,y2 normalized], "confidence": float}]`.
+  The edge eval harness adapters mirror this exact shape so format swaps
+  are uniform.
+
+### pytest_asyncio collection bug in this repo
+- Where: pytest-asyncio 0.23 + pytest 8 + a tests `__init__.py` package.
+- Pattern: `pytest server/tests/` and `pytest training/edge/tests/` both
+  fail at COLLECTION with `AttributeError: 'Package' object has no attribute 'obj'`.
+  The fix is to disable the asyncio plugin: `pytest -p no:asyncio …`.
+  Pre-existing; not specific to anything in this PRD.
+
+### ultralytics fuses Conv+BN at first predict() — measure params/FLOPs first
+- Where: `training/edge/eval/adapters/pytorch_adapter.py:_compute_params_flops`
+- Pattern: `YOLO(...)` followed by `model(frame)` mutates `model.model` in
+  place (Conv+BN fusion + reparameterization). thop's hook tracing breaks
+  on the fused graph and param counts shift. Snapshot params and FLOPs in
+  `__init__` BEFORE any predict() runs.
+
+### Val sets are big — manifest > duplication
+- Where: `training/edge/data/val/manifest.txt` + `training/edge/eval/val_loader.py`
+- Pattern: The naive bootstrap that copies images alongside labels
+  ballooned the repo by 68 MB. Better: write a manifest of
+  tab-separated `image_path<TAB>label_path` (paths relative to manifest's
+  dir) and resolve at load time. Keeps repo tracking only the labels
+  (~100 KB) while images stay where they live (`data/cat_photos/`).
+
+### Run eval harness end-to-end
+- Where: `training/edge/eval/README.md`
+- Pattern: any later story producing a model variant should write its
+  result through `python -m training.edge.eval.run_eval --story-id <id> ...`
+  to `training/edge/results/<id>.json` matching the EvalResult schema.
+  Future SUMMARY.md (US-012) is built mechanically from these files.
+
+---
+
+## 2026-04-28 — US-001: Build edge eval harness + record YOLOv8s and YOLOv8n baselines
+
+**Status**: PASSED
+**Files changed**:
+- training/{__init__.py, edge/__init__.py, edge/tests/__init__.py} — package skeleton
+- training/edge/eval/types.py — EvalResult dataclass + JSON round-trip
+- training/edge/eval/metrics.py — single-class mAP@0.5 (greedy IoU + VOC 11-pt)
+- training/edge/eval/latency.py — measure_latency(predict_fn, frame, runs=100, warmup=10)
+- training/edge/eval/val_loader.py — manifest + dir layouts, normalized cx/cy/w/h -> xyxy
+- training/edge/eval/bootstrap_val.py — silver GT bootstrap from data/cat_photos
+- training/edge/eval/run_eval.py — CLI tying it all together
+- training/edge/eval/adapters/{base,pytorch,onnx,tflite}_adapter.py
+- training/edge/eval/README.md — bootstrap procedure, mAP source citation
+- training/edge/requirements_edge.txt — onnx 1.16.1, onnxruntime 1.18.1, tf-cpu>=2.15, pycocotools 2.0.7, thop, onnx-tf
+- training/edge/data/val/labels/*.txt — 22 YOLO-format silver GT files
+- training/edge/data/val/manifest.txt — tab-separated path pairs
+- training/edge/tests/test_eval_harness.py — 8 mock-based pytest cases
+- training/edge/results/US-001-{yolov8s-baseline,yolov8n-baseline-1280,yolov8n-baseline-224}.json
+- training/edge/results/US-001.md — comparison table
+
+**Acceptance criteria verified**:
+- [x] EvalResult dataclass with all 12 fields (story_id, model_path, model_format, map50, size_bytes, params, flops, input_hw, latency_ms_p50, latency_ms_p95, val_images, notes)
+- [x] run_eval CLI: `python -m training.edge.eval.run_eval --model <path> --format <fmt> --story-id <id> --val-dir <path>` writes training/edge/results/<id>.json
+- [x] mAP@0.5 single-class with pycocotools/VOC 2010 source cited in metrics.py
+- [x] Latency: median + p95 over 100 runs after 10 warmup, single-thread (torch + onnxruntime + tflite all set)
+- [x] Val set bootstrapped from data/cat_photos via CatDetector silver GT; README.md documents procedure and silver caveat
+- [x] yolov8s baseline @ 1280 written to training/edge/results/US-001-yolov8s-baseline.json
+- [x] yolov8n baselines @ 1280 and @ 224 written to corresponding JSON files
+- [x] training/edge/results/US-001.md summary table
+- [x] 8 pytest tests covering EvalResult round-trip, latency timing on mocked sleep, mAP=1.0 when preds==GT, plus IoU and adapter coverage
+- [x] training/edge/requirements_edge.txt with pinned versions
+- [x] `git diff main -- server/` is empty
+- [x] pytest -p no:asyncio training/edge/tests/ — 8 passed
+
+**Learnings**:
+- Silver GT mAP for yolov8s is 1.0 by construction (the val labels are its
+  own predictions). Document this so it doesn't get cited as a real number.
+- Saved val-set images would have committed 68 MB of duplicated JPEGs;
+  a manifest pointing back at `data/cat_photos/` is the right design.
+- ultralytics 8.2.0 mutates the model in place during the first predict()
+  via Conv+BN fusion. Compute params/FLOPs in __init__ before any
+  predict() to keep thop happy and the param count consistent.
+- pytest_asyncio's collection bug bites BOTH server/tests/ and
+  training/edge/tests/ in this repo. Recommended invocation is
+  `pytest -p no:asyncio …`. We did not "fix" the broken plugin in this
+  story since it's out of scope.
+- run_eval flops=0 is the silent-fallback signal that thop is missing or
+  the adapter couldn't trace; pytorch path fills it correctly.
+
+---

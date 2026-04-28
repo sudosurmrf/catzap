@@ -25,8 +25,8 @@
       "technicalNotes": "Mirror the CatDetector signature shape (server/vision/detector.py:7-40) so the eval harness has a uniform `predict(frame)->list[bbox+conf]` interface across formats. For YOLO models use ultralytics.YOLO directly. For ONNX use onnxruntime.InferenceSession. For TFLite use tf.lite.Interpreter. FLOPs via thop.profile. Test pattern: mirror server/tests/test_detector.py — pytest, unittest.mock.@patch, assert on returned dicts. Pull val frames from data/cat_photos/ which already exists with labeled-by-cat-uuid subdirs.",
       "dependsOn": [],
       "priority": 1,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented in iteration 1. Files: training/edge/eval/{types,metrics,latency,val_loader,bootstrap_val,run_eval}.py + adapters/{pytorch,onnx,tflite}_adapter.py + tests/test_eval_harness.py + requirements_edge.txt + results/US-001*.{json,md}. Val set is 22 silver-GT frames from data/cat_photos via yolov8s teacher (5 skipped no-detection); manifest references source images in place to avoid duplicating ~68MB of JPEGs. 8 pytest tests pass. server/ untouched."
     },
     {
       "id": "US-002",
