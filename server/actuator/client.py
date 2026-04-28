@@ -131,6 +131,15 @@ def _clamp_to_bounds(pan: float, tilt: float) -> tuple[float, float]:
 _TRAVERSE_STEP_DEG = 6.0
 _TRAVERSE_STEP_DELAY_S = 0.030
 
+# Hard cap on sub-sends per traverse. Without it, a stale `_last_sent_pan`
+# (e.g. left over from a network blip while the sweep advanced 60°+) would
+# produce a 10-20 command burst at 33 Hz on the wire, which both
+# competes with the next iteration's dispatch for the lock and visibly
+# rapid-fires the servo through dozens of intermediate poses. Capping at
+# 12 keeps normal tracking jumps unaffected (a 60° jump = 10 sub-steps,
+# under the cap) while bounding worst-case wall time at ~360 ms.
+_TRAVERSE_MAX_STEPS = 12
+
 
 class ActuatorClient:
     """HTTP client for communicating with the ESP32 DEVKITV1 actuator.
@@ -144,7 +153,15 @@ class ActuatorClient:
 
     def __init__(self, base_url: str):
         self.base_url = base_url.rstrip("/")
-        self._client = httpx.AsyncClient()
+        # The ESP32's WebServer sends `Connection: close` per response, so
+        # httpx can't actually reuse sockets — but its default keepalive
+        # pool will still hand back a half-closed socket whose next request
+        # surfaces as `ConnectError: All connection attempts failed`.
+        # Disabling the keepalive pool forces a fresh connection per request
+        # and eliminates that failure mode.
+        self._client = httpx.AsyncClient(
+            limits=httpx.Limits(max_connections=4, max_keepalive_connections=0),
+        )
         # Rate-limited traverse state: track the last successfully-sent
         # snapped pose so we can interpolate large moves. None until the
         # first send completes, at which point the first command goes
@@ -220,7 +237,13 @@ class ActuatorClient:
         target_pan, target_tilt = self._prepare_pose(endpoint, pan, tilt)
 
         async with self._traverse_lock:
-            # First-ever send: no known starting pose, go direct and record.
+            # First-ever send (or post-failure recovery, where
+            # _last_sent_pan/tilt was reset to None below): no known
+            # starting pose, go direct and record only on success. A
+            # failed first-ever send leaves _last_sent_pan/tilt at None
+            # so the next call also takes this single-shot path —
+            # recovery from a network blip is a sequence of single
+            # POSTs, never a multi-sub-send burst.
             if self._last_sent_pan is None or self._last_sent_tilt is None:
                 ok = await self._send_pose(endpoint, target_pan, target_tilt)
                 if ok:
@@ -234,28 +257,38 @@ class ActuatorClient:
             delta_tilt = target_tilt - start_tilt
             max_distance = max(abs(delta_pan), abs(delta_tilt))
 
-            # Number of sub-steps is driven by the larger axis distance.
-            # For combined moves, the dominant axis gets 1° per step and
-            # the other axis interpolates linearly, with repeats wherever
-            # its position hasn't crossed an integer snap boundary yet.
+            # Number of sub-steps is driven by the larger axis distance,
+            # then capped at _TRAVERSE_MAX_STEPS. The cap matters when
+            # `_last_sent_pan/tilt` has drifted from `target` — usually
+            # the result of the sweep advancing while a prior traverse
+            # was failing under network errors. Without the cap the
+            # recovery traverse rapid-fires through every intermediate
+            # pose between the stale start and the new target.
             num_steps = max(1, int(math.ceil(max_distance / _TRAVERSE_STEP_DEG)))
+            num_steps = min(num_steps, _TRAVERSE_MAX_STEPS)
 
-            last_ok = True
             for i in range(1, num_steps + 1):
                 frac = i / num_steps
                 intermediate_pan = snap_to_servo_step(start_pan + delta_pan * frac)
                 intermediate_tilt = snap_to_servo_step(start_tilt + delta_tilt * frac)
-                last_ok = await self._send_pose(endpoint, intermediate_pan, intermediate_tilt)
-                if not last_ok:
-                    # Abort the rest of the traverse on first failure.
-                    # Leaves state at the last successful intermediate
-                    # so the next call resumes from there.
-                    break
+                ok = await self._send_pose(endpoint, intermediate_pan, intermediate_tilt)
+                if not ok:
+                    # Reset the cached "last sent" state so the next call
+                    # takes the first-ever-send path (a single direct
+                    # POST) rather than computing a delta against this
+                    # now-stale reference. Leaving _last_sent at the
+                    # last successful intermediate would cause the
+                    # next call to walk the full accumulated drift,
+                    # producing the rapid left/right snap-back that
+                    # piles up timeouts and inflates the next failure.
+                    self._last_sent_pan = None
+                    self._last_sent_tilt = None
+                    return False
                 self._last_sent_pan = intermediate_pan
                 self._last_sent_tilt = intermediate_tilt
                 if i < num_steps:
                     await asyncio.sleep(_TRAVERSE_STEP_DELAY_S)
-            return last_ok
+            return True
 
     async def aim(self, pan: float, tilt: float) -> bool:
         """Route a pose command through the rate-limited traverse to the
@@ -318,6 +351,12 @@ class ActuatorClient:
             if ok:
                 self._last_sent_pan = target_pan
                 self._last_sent_tilt = target_tilt
+            else:
+                # Reset on failure so the next traverse-mode call takes
+                # the first-ever-send path instead of computing a delta
+                # from the stale prior position.
+                self._last_sent_pan = None
+                self._last_sent_tilt = None
             return ok
 
     async def stop(self) -> bool:

@@ -225,6 +225,24 @@ async def run_vision_loop(app_state: dict):
     # rather than queue them, which is the right tradeoff for a tracking rig.
     _goto_task: asyncio.Task | None = None
 
+    async def _send_sweep_goto(target_pan: float, target_tilt: float, target_pan_int: int, target_tilt_int: int):
+        """Wrapper around `_actuator.goto` that only updates the dedupe
+        state (`_last_sent_pan_int / _last_sent_tilt_int`) on success.
+
+        Without this, a failed goto (ConnectTimeout / ReadTimeout under a
+        WiFi blip) silently advances the dedupe state to the requested
+        pose, so the next iteration's dedupe check matches and skips the
+        retry. Sweep keeps advancing `current_pan` while no commands
+        actually reach the rig, the actuator's own `_last_sent_pan`
+        diverges, and recovery becomes a single huge catch-up move
+        instead of the steady stream that should have been sent.
+        """
+        nonlocal _last_sent_pan_int, _last_sent_tilt_int
+        ok = await _actuator.goto(target_pan, target_tilt)
+        if ok:
+            _last_sent_pan_int = target_pan_int
+            _last_sent_tilt_int = target_tilt_int
+
     # Detection smoother: holds recent detections for a grace window so
     # single-frame YOLO misses don't cause flicker.
     smoothed_dets: list[dict] = []   # [{bbox, confidence, _last_seen, _id}]
@@ -370,13 +388,13 @@ async def run_vision_loop(app_state: dict):
                     # Caps in-flight goto count at exactly 1 — no backlog.
                     if _goto_task is None or _goto_task.done():
                         _goto_task = asyncio.create_task(
-                            _actuator.goto(
+                            _send_sweep_goto(
                                 _sweep_controller.current_pan,
                                 _sweep_controller.current_tilt,
+                                pan_int,
+                                tilt_int,
                             )
                         )
-                        _last_sent_pan_int = pan_int
-                        _last_sent_tilt_int = tilt_int
 
             # Grab frame. In production we also receive the original JPEG
             # bytes alongside the decoded numpy array — the websocket
@@ -582,9 +600,27 @@ async def run_vision_loop(app_state: dict):
                         center_y = (bbox[1] + bbox[3]) / 2
                         fire_target = {"x": center_x, "y": center_y, "zone": zone_name}
                     else:
-                        await _actuator.goto(tgt_pan, tgt_tilt, direct=True)
-                        _last_sent_pan_int = snap_to_servo_step(tgt_pan)
-                        _last_sent_tilt_int = snap_to_servo_step(tgt_tilt)
+                        # The sweep dispatch at the top of this iteration
+                        # may have queued a goto for the pre-engagement
+                        # pose (sweep tick ran before detection). If we
+                        # fire the direct=True goto now, it queues behind
+                        # that traverse on _traverse_lock and the rig
+                        # walks toward the sweep target before snapping
+                        # to the engagement target — a visible "right
+                        # then left" jolt. Cancel the pending sweep goto
+                        # so the engagement target is what hits the wire
+                        # first.
+                        if _goto_task is not None and not _goto_task.done():
+                            _goto_task.cancel()
+                            try:
+                                await _goto_task
+                            except (asyncio.CancelledError, Exception):
+                                pass
+                            _goto_task = None
+                        goto_ok = await _actuator.goto(tgt_pan, tgt_tilt, direct=True)
+                        if goto_ok:
+                            _last_sent_pan_int = snap_to_servo_step(tgt_pan)
+                            _last_sent_tilt_int = snap_to_servo_step(tgt_tilt)
                         success = await _actuator.fire()
                         fired = success
 
