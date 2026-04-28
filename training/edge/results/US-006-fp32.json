@@ -1,0 +1,17 @@
+{
+  "story_id": "US-006-fp32",
+  "model_path": "training/edge/models/yolov8n_cat_distilled.pt",
+  "model_format": "pytorch",
+  "map50": 1.0000000000000002,
+  "size_bytes": 6202009,
+  "params": 3011043,
+  "flops": 501891712,
+  "input_hw": [
+    224,
+    224
+  ],
+  "latency_ms_p50": 5.419396504294127,
+  "latency_ms_p95": 6.892717207665555,
+  "val_images": 120,
+  "notes": "yolov8n student distilled from yolov8s teacher (alpha=0.5, T=4.0); 50 epochs single_cls=True"
+}
