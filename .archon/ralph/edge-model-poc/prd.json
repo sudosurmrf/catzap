@@ -1,0 +1,256 @@
+{
+  "project": "catzap",
+  "branchName": "ralph/edge-model-poc",
+  "prdFile": "prd.md",
+  "description": "Iterative model reduction PoC: shrink YOLOv8s -> quantized YOLOv8n-cat and evaluate NanoDet-Plus-m alongside, with TFLM host emulation to predict ESP32-S3 viability before boards arrive.",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Build edge eval harness + record YOLOv8s and YOLOv8n baselines",
+      "description": "As the catzap maintainer, I want a single eval harness under training/edge/eval/ that measures mAP@0.5, model size, params, FLOPs, and host-CPU INT8 latency for any TFLite/ONNX/PyTorch model on a held-out cat val set, so that every later story produces directly comparable metrics.",
+      "acceptanceCriteria": [
+        "Create training/edge/eval/types.py with the EvalResult dataclass exactly as specified in prd.md (story_id, model_path, model_format, map50, size_bytes, params, flops, input_hw, latency_ms_p50, latency_ms_p95, val_images, notes).",
+        "Create training/edge/eval/run_eval.py with CLI: `python -m training.edge.eval.run_eval --model <path> --format <pytorch|onnx|tflite_fp32|tflite_int8> --story-id <id> --val-dir <path>` that writes training/edge/results/<story-id>.json matching EvalResult.",
+        "mAP@0.5 implementation: use a vendored or pip-installed pycocotools-style implementation; cite source in code comment. Single-class evaluation only (class_id=0=cat).",
+        "Latency: median + p95 over 100 single-thread CPU runs after 10 warmup runs; explicitly set torch/onnxruntime/tflite to single thread.",
+        "Held-out val set: bootstrap from data/cat_photos/ by running existing CatDetector (server/vision/detector.py:CatDetector) over those images and saving GT labels in YOLO format under training/edge/data/val/. Document the bootstrap procedure in training/edge/eval/README.md and note that this is a 'silver' GT until US-002 manual cleanup.",
+        "Record YOLOv8s baseline: run harness on yolov8s.pt at imgsz=1280, write training/edge/results/US-001-yolov8s-baseline.json.",
+        "Record YOLOv8n baseline: run harness on yolov8n.pt at imgsz=1280 AND at imgsz=224, write training/edge/results/US-001-yolov8n-baseline-1280.json and training/edge/results/US-001-yolov8n-baseline-224.json.",
+        "Write training/edge/results/US-001.md summarizing the three baseline rows in a small markdown table.",
+        "training/edge/tests/test_eval_harness.py: at least three pytest tests mirroring server/tests/test_detector.py style (use unittest.mock.@patch for the model). Cover: EvalResult JSON round-trip, latency timing on a mocked predict() that sleeps a known duration, mAP=1.0 when predictions == ground truth.",
+        "Add training/edge/requirements_edge.txt with pinned versions of: onnx, onnxruntime, tensorflow-cpu (>=2.15 for tf.lite), pycocotools (or equivalent), thop (for FLOPs).",
+        "No edits to any file under server/. `git diff main -- server/` is empty.",
+        "pytest training/edge/tests/ passes."
+      ],
+      "technicalNotes": "Mirror the CatDetector signature shape (server/vision/detector.py:7-40) so the eval harness has a uniform `predict(frame)->list[bbox+conf]` interface across formats. For YOLO models use ultralytics.YOLO directly. For ONNX use onnxruntime.InferenceSession. For TFLite use tf.lite.Interpreter. FLOPs via thop.profile. Test pattern: mirror server/tests/test_detector.py — pytest, unittest.mock.@patch, assert on returned dicts. Pull val frames from data/cat_photos/ which already exists with labeled-by-cat-uuid subdirs.",
+      "dependsOn": [],
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-002",
+      "title": "Auto-label ESP32-CAM frames into YOLO-format cat dataset (>=500 frames)",
+      "description": "As the maintainer, I want an auto-labeler that pulls frames from the ESP32-CAM /stream, runs the existing CatDetector as a teacher, emits YOLO-format labels, and gives me a small CLI to manually review/cleanup, so that I have a single-class cat training set of at least 500 labeled frames without doing all the labeling by hand.",
+      "acceptanceCriteria": [
+        "Create training/edge/auto_label.py (NOT under server/vision/ — input spec said server/vision/auto_label.py but per non-goal in prd.md we keep server/ untouched; place it under training/edge/ instead and document the deviation in training/edge/results/US-002.md).",
+        "CLI: `python -m training.edge.auto_label --stream-url http://<esp32cam-ip>/stream --out-dir training/edge/data/raw/ --target-frames 600 --min-confidence 0.5` pulls JPEG frames from MJPEG stream, runs CatDetector (imported from server.vision.detector — read-only import), writes <frame>.jpg + <frame>.txt (YOLO format, class_id=0).",
+        "Frames where the teacher returns zero detections are skipped and logged; frames with detections below --min-confidence are also skipped. Log a final summary count.",
+        "Manual cleanup CLI: `python -m training.edge.auto_label review --in-dir training/edge/data/raw/` opens each frame in a window (cv2.imshow) overlaying the YOLO label box, accepts keys: [a]ccept, [r]eject, [d]elete-box, [n]ext-without-action. Decisions are written to training/edge/data/labeled/ (accepted) or training/edge/data/rejected/ (rejected).",
+        "Final dataset at training/edge/data/labeled/ contains >= 500 image+label pairs. Verified by a `make_dataset_manifest.py` helper that writes training/edge/data/labeled/manifest.json with count, train/val split (80/20), per-image checksums.",
+        "Also save a 200-frame calibration set at training/edge/data/calibration_frames/ (subset of labeled, no labels needed).",
+        "training/edge/tests/test_auto_label.py: mock httpx/cv2 stream reader, mock CatDetector, assert correct YOLO-format output (class_id=0, normalized cx cy w h, four floats per line, one line per detection).",
+        "No edits to server/vision/detector.py — confirm by `git diff main -- server/vision/detector.py` is empty.",
+        "training/edge/results/US-002.md: dataset stats (total frames, accepted, rejected, mean cats per frame, distribution of bbox sizes).",
+        "pytest training/edge/tests/ passes."
+      ],
+      "technicalNotes": "Stream pull: `cv2.VideoCapture('http://<ip>/stream')` works against MJPEG multipart. Frame source confirmed at firmware/esp32-cam/src/main.cpp:121 (/stream endpoint, VGA 640x480, JPEG quality 12, multipart boundary 'frame'). Teacher detector: `from server.vision.detector import CatDetector; det = CatDetector('yolov8s.pt')` then `det.detect(frame)` returns normalized [x1,y1,x2,y2] which we convert to YOLO cx cy w h. COCO class id stays at server's COCO_CAT_CLASS=15 (server/vision/detector.py:4) but we re-emit as our single-class id 0. Deviation note: input spec asked for server/vision/auto_label.py but PRD non-goal forbids touching server/vision/; placing under training/edge/ instead.",
+      "dependsOn": ["US-001"],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-003",
+      "title": "Fine-tune YOLOv8n single-class (cat-only) on auto-labeled set",
+      "description": "As the maintainer, I want to fine-tune YOLOv8n with single-class cat-only on the US-002 dataset, so that I have a smaller cat-specialized PyTorch model to feed into the quantization pipeline.",
+      "acceptanceCriteria": [
+        "Create training/edge/yolo/train_yolov8n_cat.py that uses ultralytics.YOLO(yolov8n.pt).train() with: data=training/edge/data/labeled/data.yaml, epochs=50 (configurable via CLI), imgsz=224, batch=32, single_cls=True, device=auto.",
+        "training/edge/data/labeled/data.yaml: standard ultralytics format with train/val paths from US-002 manifest, names: ['cat'], nc: 1.",
+        "Output checkpoint saved to training/edge/models/yolov8n_cat.pt (use ultralytics best.pt, copied to this canonical path).",
+        "Run eval harness: `python -m training.edge.eval.run_eval --model training/edge/models/yolov8n_cat.pt --format pytorch --story-id US-003 --val-dir training/edge/data/labeled/val/` produces training/edge/results/US-003.json.",
+        "training/edge/results/US-003.md: comparison table vs US-001-yolov8n-baseline-224 (mAP delta, latency delta, size delta) — show that fine-tuning improved mAP on the cat-only val set.",
+        "training/edge/tests/test_yolo_train.py: at least one smoke test that mocks ultralytics.YOLO and asserts the train() call is made with single_cls=True and imgsz=224.",
+        "No diff on server/. Existing CatDetector import smoke test still passes.",
+        "pytest training/edge/tests/ passes."
+      ],
+      "technicalNotes": "Use ultralytics 8.2.0 (already in server/requirements.txt). Trainer pattern from server/vision/trainer.py:70-174 is informative but we don't reuse it — ultralytics has its own training loop. Starting checkpoint is yolov8n.pt at repo root (6.5 MB). single_cls=True is the ultralytics flag that collapses all classes to one and skips multi-class loss components. imgsz=224 chosen to match anticipated ESP32-CAM crop size on-device.",
+      "dependsOn": ["US-001", "US-002"],
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-004",
+      "title": "Post-training INT8 quantization: YOLOv8n-cat ONNX -> TFLite",
+      "description": "As the maintainer, I want to take the fine-tuned YOLOv8n-cat checkpoint, export to ONNX, then convert to INT8 TFLite using a 200-frame calibration set, so that I have a quantized model under 2 MB ready for the host TFLM benchmark.",
+      "acceptanceCriteria": [
+        "Create training/edge/yolo/export_quantize.py that: (1) loads training/edge/models/yolov8n_cat.pt via ultralytics .export(format='onnx', imgsz=224, dynamic=False, simplify=True), (2) loads the resulting ONNX in tf.lite via onnx-tf or via the tf2onnx reverse path (document chosen path), (3) runs tf.lite.TFLiteConverter with optimizations=[tf.lite.Optimize.DEFAULT], representative_dataset pulling from training/edge/data/calibration_frames/, target_spec.supported_ops with INT8 only, inference_input_type=tf.int8, inference_output_type=tf.int8.",
+        "Output: training/edge/models/yolov8n_cat_int8.tflite, size <= 2.5 MB (target 2.0 MB).",
+        "Calibration loader: yields ~200 frames as float32 [0,1] tensors of shape (1, 224, 224, 3); document NHWC vs NCHW handling.",
+        "Run eval harness: `python -m training.edge.eval.run_eval --model training/edge/models/yolov8n_cat_int8.tflite --format tflite_int8 --story-id US-004 --val-dir training/edge/data/labeled/val/` produces training/edge/results/US-004.json.",
+        "training/edge/results/US-004.md: table comparing US-003 (fp32 PyTorch) vs US-004 (INT8 TFLite) — mAP delta, size delta, latency delta. Explicitly compute and print mAP_drop = US-003.map50 - US-004.map50.",
+        "If mAP_drop > 3.0 points, the markdown report MUST include a one-line statement: 'PTQ mAP drop exceeds 3.0 points; US-005 (QAT) is required.' This signals US-005 work is non-optional.",
+        "training/edge/tests/test_quantize.py: mock the tf.lite converter and verify representative_dataset is called >= 100 times, and that input/output dtypes are int8.",
+        "No diff on server/.",
+        "pytest training/edge/tests/ passes."
+      ],
+      "technicalNotes": "ONNX export: ultralytics built-in `.export(format='onnx')` is the canonical path. ONNX -> TFLite is the trickiest step; two viable routes are (a) onnx -> tf via onnx-tf, then tf -> tflite, or (b) ultralytics built-in `.export(format='tflite', int8=True)` if version supports it. Try (b) first; fall back to (a). Document choice in training/edge/yolo/export_quantize.py docstring. Calibration set comes from US-002 (training/edge/data/calibration_frames/, ~200 frames). Must be float32 [0,1] NHWC for tf.lite. inference_input_type=tf.int8 quantizes the input layer too, which matters for ESP32-S3 where we want to skip a float dequant op.",
+      "dependsOn": ["US-001", "US-003"],
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-005",
+      "title": "Conditional QAT recovery if PTQ mAP dropped > 3 points",
+      "description": "As the maintainer, I want a quantization-aware training pass that runs only if US-004's PTQ caused more than 3 points of mAP drop, so that I can recover accuracy without spending time on QAT when it isn't needed.",
+      "acceptanceCriteria": [
+        "Create training/edge/yolo/qat_finetune.py that reads training/edge/results/US-004.json and computes mAP_drop = US-003.map50 - US-004.map50.",
+        "If mAP_drop <= 3.0, the script prints 'PTQ acceptable; QAT skipped.' and writes training/edge/results/US-005.json with status='skipped' and an explanation. The story is still marked complete.",
+        "If mAP_drop > 3.0, the script runs ONE epoch of QAT: insert fake-quant nodes via torch.ao.quantization (or ultralytics QAT helper if it exists in 8.2.0), fine-tune on training/edge/data/labeled/ for one epoch with reduced LR (1e-4), then re-export to INT8 TFLite as training/edge/models/yolov8n_cat_qat_int8.tflite.",
+        "Run eval harness on the QAT output: `python -m training.edge.eval.run_eval --model training/edge/models/yolov8n_cat_qat_int8.tflite --format tflite_int8 --story-id US-005 --val-dir training/edge/data/labeled/val/`.",
+        "training/edge/results/US-005.md: either (a) one-line explanation of why QAT was skipped + the PTQ mAP_drop value, or (b) a table showing PTQ vs QAT mAP recovery and final size.",
+        "training/edge/tests/test_qat_decision.py: parametrized pytest covering both branches — given a US-004.json with mAP_drop=2.0 the script exits skipped; given mAP_drop=5.0 the script proceeds with QAT (mock the actual training step).",
+        "No diff on server/.",
+        "pytest training/edge/tests/ passes."
+      ],
+      "technicalNotes": "Whether QAT actually runs depends on US-004's measured mAP drop, so the script must inspect the prior result file rather than be hard-coded. Use torch.ao.quantization.prepare_qat for fake-quant insertion if going manual. ultralytics 8.2.0 may or may not expose first-class QAT — check before writing custom code. One epoch is the input spec — do not extend it without explicit approval.",
+      "dependsOn": ["US-003", "US-004"],
+      "priority": 5,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-006",
+      "title": "Knowledge distillation: YOLOv8s teacher -> YOLOv8n student (cat-only)",
+      "description": "As the maintainer, I want to fine-tune the YOLOv8n student with a YOLOv8s teacher's soft outputs as an additional loss, so that we get a second candidate YOLOv8n-cat checkpoint that may outperform the plain fine-tune of US-003 at similar size after quantization.",
+      "acceptanceCriteria": [
+        "Create training/edge/yolo/distill_train.py that: (1) loads yolov8s.pt as frozen teacher, (2) loads yolov8n.pt as student, (3) runs a custom training loop on training/edge/data/labeled/ with combined loss = standard YOLO loss + alpha * distillation_loss(student_logits, teacher_logits). Document alpha choice (default 0.5) in the script.",
+        "Output: training/edge/models/yolov8n_cat_distilled.pt, then quantize via the SAME pipeline as US-004 (call into training.edge.yolo.export_quantize) to produce training/edge/models/yolov8n_cat_distilled_int8.tflite.",
+        "Run eval harness on both fp32 and int8 distilled checkpoints; write training/edge/results/US-006-fp32.json and training/edge/results/US-006-int8.json.",
+        "training/edge/results/US-006.md: 4-row comparison table (US-003 fp32, US-004 int8, US-006 fp32 distilled, US-006 int8 distilled) with mAP, size, latency.",
+        "training/edge/tests/test_distill.py: at least one test that mocks teacher/student and asserts the combined loss is computed (teacher gradient is detached, student gradient flows).",
+        "No diff on server/.",
+        "pytest training/edge/tests/ passes."
+      ],
+      "technicalNotes": "Distillation loss: KL divergence on classification head outputs is the standard choice. Teacher must be in eval mode with torch.no_grad() for the teacher forward. Reuse training/edge/data/labeled/ from US-002 and the calibration set from US-002. The export+quantize step should reuse training.edge.yolo.export_quantize.export_and_quantize() to keep the pipeline identical.",
+      "dependsOn": ["US-002", "US-003", "US-004"],
+      "priority": 6,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-007",
+      "title": "Set up NanoDet-Plus-m 0.5x environment + reproduce upstream baseline",
+      "description": "As the maintainer, I want NanoDet-Plus-m 0.5x training environment installed under training/edge/nanodet/ and the upstream pretrained checkpoint evaluated through our eval harness, so that I have a sanity-checked starting point for cat-only fine-tuning.",
+      "acceptanceCriteria": [
+        "Create training/edge/nanodet/ with: README.md (setup steps), requirements_nanodet.txt (nanodet-plus pip package or git submodule pin), and an isolated venv setup script (setup_venv.sh) that creates training/edge/nanodet/.venv/ — separate venv allowed per input spec.",
+        "Download the upstream NanoDet-Plus-m 0.5x pretrained 416x416 checkpoint to training/edge/nanodet/checkpoints/nanodet_plus_m_0.5x_pretrained.pth (use the official release URL; document SHA256).",
+        "Add a NanoDet adapter at training/edge/eval/adapters/nanodet_adapter.py implementing the same predict(frame)->list[bbox+conf] interface as the YOLO path, so the eval harness can run NanoDet without code changes outside this adapter.",
+        "Adapter must filter NanoDet's COCO class outputs to class_id=15 (cat) and re-emit as single-class id=0, mirroring the auto-labeler's class remap.",
+        "Run eval harness: `python -m training.edge.eval.run_eval --model training/edge/nanodet/checkpoints/nanodet_plus_m_0.5x_pretrained.pth --format pytorch --story-id US-007 --val-dir training/edge/data/labeled/val/` produces training/edge/results/US-007.json.",
+        "training/edge/results/US-007.md: short report — NanoDet pretrained mAP@0.5 on cat-only val set, expected to be substantially lower than YOLOv8n baseline (because NanoDet is general-purpose COCO and not cat-finetuned). Document this as expected.",
+        "training/edge/tests/test_nanodet_adapter.py: mock NanoDet model, assert adapter remaps class_id=15 to id=0 and drops other classes.",
+        "No diff on server/.",
+        "pytest training/edge/tests/ passes."
+      ],
+      "technicalNotes": "NanoDet-Plus-m 0.5x is from https://github.com/RangiLyu/nanodet — pretrained weights at https://github.com/RangiLyu/nanodet/releases. The package may conflict with ultralytics on torch versions; isolated venv is the right call. Adapter pattern: training/edge/eval/adapters/ should also retroactively contain a yolo_adapter.py so the run_eval CLI uses adapters uniformly. Refactor US-001's run_eval if needed to delegate to adapters keyed off --format and a model-type sniff. NanoDet output format: list of [class_id, x1, y1, x2, y2, conf] — convert to our normalized bbox format.",
+      "dependsOn": ["US-001"],
+      "priority": 7,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-008",
+      "title": "Fine-tune NanoDet-Plus-m 0.5x cat-only at 224x224",
+      "description": "As the maintainer, I want NanoDet-Plus-m 0.5x fine-tuned single-class cat at 224x224 on the US-002 dataset, so that NanoDet has a fair shot in the final comparison against the YOLOv8n-cat candidate.",
+      "acceptanceCriteria": [
+        "Create training/edge/nanodet/train_nanodet_cat.py that wraps the upstream nanodet train CLI with a config override for: num_classes=1, input_size=[224,224], train/val data pointing at training/edge/data/labeled/, lr=1e-4 (fine-tune from pretrained), epochs=50.",
+        "Generate training/edge/nanodet/configs/nanodet_plus_m_0.5x_cat.yml with the overrides above (start from upstream nanodet-plus-m_0.5x.yml).",
+        "Output checkpoint at training/edge/nanodet/checkpoints/nanodet_cat_0.5x_224.pth (the script must copy/symlink the upstream best checkpoint to this canonical path).",
+        "Run eval harness: produces training/edge/results/US-008.json.",
+        "training/edge/results/US-008.md: comparison vs US-007 (pretrained vs fine-tuned NanoDet) and vs US-003 (fine-tuned YOLOv8n) — show whether NanoDet is competitive at fp32.",
+        "training/edge/tests/test_nanodet_train.py: at least one smoke test that mocks the nanodet trainer and asserts num_classes=1 and input_size=224 are passed in the config.",
+        "No diff on server/.",
+        "pytest training/edge/tests/ passes."
+      ],
+      "technicalNotes": "NanoDet upstream uses YAML configs and a CLI like `python tools/train.py path/to/config.yml`. We wrap that. Reuse training/edge/data/labeled/ from US-002 — its YOLO format must be converted to NanoDet's expected COCO-format JSON; either convert in a one-shot helper at training/edge/nanodet/yolo_to_coco.py or use NanoDet's built-in YOLO loader if available. Document conversion path in the training script.",
+      "dependsOn": ["US-002", "US-007"],
+      "priority": 8,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-009",
+      "title": "NanoDet-cat ONNX -> TFLite INT8 with calibration",
+      "description": "As the maintainer, I want the fine-tuned NanoDet-cat checkpoint exported to INT8 TFLite using the same calibration set as YOLOv8n, so that the final comparison is apples-to-apples.",
+      "acceptanceCriteria": [
+        "Create training/edge/nanodet/export_quantize.py that: (1) exports training/edge/nanodet/checkpoints/nanodet_cat_0.5x_224.pth to ONNX (NanoDet has built-in tools/export_onnx.py — wrap it), (2) converts ONNX to INT8 TFLite using THE SAME representative_dataset loader as US-004 (import and reuse training.edge.yolo.export_quantize.calibration_loader to keep calibration identical).",
+        "Output: training/edge/models/nanodet_cat_0.5x_224_int8.tflite.",
+        "Run eval harness: produces training/edge/results/US-009.json.",
+        "training/edge/results/US-009.md: 4-row table — NanoDet pretrained (US-007), NanoDet fp32 fine-tuned (US-008), NanoDet INT8 (US-009), and on-host INT8 latency. Explicitly compute and report mAP_drop_quant = US-008.map50 - US-009.map50.",
+        "training/edge/tests/test_nanodet_quantize.py: assert calibration_loader is the same callable imported from training.edge.yolo.export_quantize (not a separately-defined one).",
+        "No diff on server/.",
+        "pytest training/edge/tests/ passes."
+      ],
+      "technicalNotes": "Critical that calibration_loader is shared with US-004 so the comparison is fair. Refactor US-004 if needed to expose calibration_loader as a top-level function. NanoDet's tools/export_onnx.py may emit a slightly non-standard ONNX (custom ops); validate it loads in onnxruntime first before attempting TFLite conversion. If TFLite conversion fails on a NanoDet-specific op, document the failure clearly in US-009.md and proceed with whatever quantized form is obtainable (e.g. fp16 fallback) — record format='tflite_fp16' in the EvalResult so US-012 can reflect this honestly.",
+      "dependsOn": ["US-001", "US-008"],
+      "priority": 9,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-010",
+      "title": "TFLite Micro x86 host emulator/benchmark harness",
+      "description": "As the maintainer, I want a host-side TFLite Micro benchmark binary that loads a .tflite, runs N inferences, and reports per-op timings + tensor arena size, so that I can predict ESP32-S3 fps and PSRAM usage before the boards arrive.",
+      "acceptanceCriteria": [
+        "Create firmware/edge-bench/ with: README.md, build.sh, and a thin C++ source main.cc that links against TFLM x86 host build.",
+        "build.sh clones https://github.com/tensorflow/tflite-micro at a pinned commit (record commit SHA in README.md), runs `make -f tensorflow/lite/micro/tools/make/Makefile TARGET=linux microlite`, and links a custom binary firmware/edge-bench/build/edgebench that loads a .tflite from argv[1] and runs argv[2] inferences (default 50).",
+        "Binary prints: peak arena bytes (via MicroInterpreter::arena_used_bytes()), per-op type+count+total_us via MicroProfiler, and median / p95 inference latency in us.",
+        "Python wrapper firmware/edge-bench/run_bench.py: CLI `python firmware/edge-bench/run_bench.py --model <tflite> --story-id <id> --runs 50` that invokes the binary, parses stdout, and writes training/edge/results/<story-id>-tflm.json with: arena_bytes, op_breakdown (list of {op_name, count, total_us, percent}), latency_us_p50, latency_us_p95.",
+        "Estimated ESP32-S3 latency: include a documented multiplier from x86 to ESP32-S3 (e.g. 5x-10x slower) cited from any public benchmark; include both raw_x86_us and predicted_s3_us in the JSON. Cite the multiplier source in firmware/edge-bench/README.md.",
+        "Self-test: run the binary on a tiny known-good TFLite model (e.g. the TFLM hello_world example .tflite shipped with the repo) and assert non-zero arena and at least one op in the breakdown.",
+        "Tests: training/edge/tests/test_tflm_bench_parser.py — given a fixture stdout string, parse it correctly into the JSON schema.",
+        "No diff on server/.",
+        "pytest training/edge/tests/ passes."
+      ],
+      "technicalNotes": "TFLM upstream: https://github.com/tensorflow/tflite-micro. The genericbenchmark target is the closest existing reference. We may need a small custom main.cc because genericbenchmark hard-codes a model path. Linking on x86 linux is supported and documented in tensorflow/lite/micro/docs/. Pin the commit SHA so the build is reproducible. The x86->S3 multiplier is approximate — be honest about uncertainty in the README. Tensor arena: pre-allocate a large buffer (e.g. 8MB) and read back arena_used_bytes() after AllocateTensors() — that's the actual peak we care about for PSRAM sizing.",
+      "dependsOn": ["US-001"],
+      "priority": 10,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-011",
+      "title": "Run TFLM emulator on quantized YOLOv8n-cat and NanoDet-cat",
+      "description": "As the maintainer, I want the US-010 emulator run on both quantized model candidates, so that the final SUMMARY has predicted ESP32-S3 fps and PSRAM numbers for each.",
+      "acceptanceCriteria": [
+        "Run `python firmware/edge-bench/run_bench.py --model training/edge/models/yolov8n_cat_int8.tflite --story-id US-011-yolov8n --runs 50` -> training/edge/results/US-011-yolov8n-tflm.json.",
+        "Run `python firmware/edge-bench/run_bench.py --model training/edge/models/nanodet_cat_0.5x_224_int8.tflite --story-id US-011-nanodet --runs 50` -> training/edge/results/US-011-nanodet-tflm.json.",
+        "If US-005 produced a QAT model OR US-006 produced a distilled model, also run the emulator on each and write training/edge/results/US-011-yolov8n-qat-tflm.json and/or training/edge/results/US-011-yolov8n-distilled-tflm.json.",
+        "training/edge/results/US-011.md: side-by-side comparison table — model | size | arena_bytes | top-3-ops-by-time | x86_us_p50 | predicted_s3_us_p50 | predicted_s3_fps.",
+        "If any model fails to load in TFLM (unsupported op), the markdown report MUST list the offending op and tag the model as 'TFLM-incompatible'. Do not silently exclude it — the failure itself is a finding.",
+        "training/edge/tests/test_us011_aggregate.py: parametrized test that given two JSON fixtures produces the comparison table format expected for US-012 ingestion.",
+        "No diff on server/.",
+        "pytest training/edge/tests/ passes."
+      ],
+      "technicalNotes": "This story is mostly orchestration on top of US-010. The interesting failure mode is unsupported ops — YOLO heads use custom NMS that TFLM may not support out-of-the-box, and NanoDet's GFL head also has post-processing that often runs on the host rather than in the model. Document any such ops explicitly. The 'predicted_s3_fps' is 1e6 / predicted_s3_us_p50 — be explicit about which multiplier was used.",
+      "dependsOn": ["US-004", "US-009", "US-010"],
+      "priority": 11,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-012",
+      "title": "Final SUMMARY.md decision matrix + recommendation",
+      "description": "As the maintainer, I want a single training/edge/results/SUMMARY.md that aggregates all prior story results into a model x quant x predicted-S3-fps x mAP decision matrix and explicitly recommends which model to flash first when the ESP32-S3 boards arrive.",
+      "acceptanceCriteria": [
+        "Create training/edge/results/SUMMARY.md with: (1) Decision matrix table — rows are candidate models (YOLOv8n-cat fp32, YOLOv8n-cat INT8, YOLOv8n-cat-QAT INT8 if produced, YOLOv8n-cat-distilled INT8, NanoDet-cat fp32, NanoDet-cat INT8), columns are size_bytes, mAP@0.5, host_int8_latency_ms, predicted_s3_fps, tflm_arena_bytes, tflm_compatible (yes/no/partial). (2) Recommendation section — one paragraph picking a winner with justification, citing concrete numbers from the matrix.",
+        "Create training/edge/results/aggregate_summary.py that reads all training/edge/results/*.json, builds the matrix programmatically, and writes SUMMARY.md. Run the script as part of US-012 acceptance so SUMMARY.md is regenerable from raw results.",
+        "Recommendation must address: (a) which model to flash first, (b) estimated fps on ESP32-S3, (c) estimated PSRAM headroom (target board has ~8 MB PSRAM), (d) what to expect if predicted fps is below 5 (acceptable for cat detection given low motion?), (e) one specific follow-up if the fp32 picks beat the INT8 picks on accuracy by >5 points (suggest investigating QAT or wider model).",
+        "Acceptance also requires: end-to-end final validation — `pytest server/tests/` passes (existing server tests untouched), `pytest training/edge/tests/` passes (all PoC tests), `git diff main -- server/vision/ server/main.py` is empty.",
+        "Open ONE PR off ralph/edge-model-poc to main with title 'feat(edge): cat detector model reduction PoC + TFLM bench harness' and a description listing every story ID + final recommendation summary. Do NOT push until the user explicitly approves.",
+        "training/edge/results/US-012.md: short prose explaining how to read SUMMARY.md and how to regenerate it.",
+        "training/edge/tests/test_summary_aggregate.py: given fixture training/edge/results/*.json files, aggregate_summary.py produces a SUMMARY.md whose decision matrix has the expected rows/columns.",
+        "No diff on server/.",
+        "pytest training/edge/tests/ passes."
+      ],
+      "technicalNotes": "The aggregate script makes the SUMMARY mechanical and reproducible — important because individual JSON files will be updated as iterations refine. Recommendation paragraph is a judgment call; aim for honest framing rather than confident overclaiming. PR creation is the very last step and requires user approval before pushing — the input spec says 'Open one PR at the end' but per global system guidance, do NOT push without explicit user request.",
+      "dependsOn": ["US-001", "US-002", "US-003", "US-004", "US-005", "US-006", "US-007", "US-008", "US-009", "US-010", "US-011"],
+      "priority": 12,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}
