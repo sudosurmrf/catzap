@@ -21,6 +21,14 @@ firmware/esp32-actuator/.pio/
 server/models/weights/
 server/data/cat_photos/
 
+# Edge-PoC bootstrapped datasets — regenerable via
+# `python -m training.edge.auto_label bootstrap` (deterministic seed=42).
+# Labels (.txt) + manifest.json stay tracked; JPEGs are not.
+training/edge/data/labeled/*.jpg
+training/edge/data/raw/*.jpg
+training/edge/data/calibration_frames/*.jpg
+training/edge/data/rejected/*.jpg
+
 # Superpowers
 .superpowers/
 
