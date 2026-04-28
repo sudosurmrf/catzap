@@ -42,7 +42,12 @@ def _load_adapter(model_path: str, fmt: str, imgsz: int):
     if _is_nanodet_path(model_path):
         from .adapters.nanodet_adapter import load
 
-        backend = "onnx" if model_path.lower().endswith(".onnx") else "pytorch"
+        if model_path.lower().endswith(".onnx"):
+            backend = "onnx"
+        elif model_path.lower().endswith(".tflite"):
+            backend = "tflite"
+        else:
+            backend = "pytorch"
         return load(model_path, imgsz=imgsz, backend=backend)
     if fmt == "pytorch":
         from .adapters.pytorch_adapter import load

@@ -57,6 +57,10 @@ def _is_onnx_path(path: str | Path) -> bool:
     return str(path).lower().endswith(".onnx")
 
 
+def _is_tflite_path(path: str | Path) -> bool:
+    return str(path).lower().endswith(".tflite")
+
+
 def _preprocess(
     frame: np.ndarray,
     imgsz: int,
@@ -248,6 +252,44 @@ def decode_nanodet_output(
     return out_list
 
 
+def _post_quant_score_normalize(
+    output: np.ndarray, num_classes: int = DEFAULT_NUM_CLASSES
+) -> np.ndarray:
+    """Re-sigmoid cls channels if dequantization pushed them out of [0,1].
+
+    Upstream's ``_forward_onnx`` emits cls already-sigmoid'd, which lands in
+    [0,1]. After ONNX -> TFLite int8 PTQ the per-tensor output scale is fitted
+    to span both cls (sigmoid 0..1) and reg (DFL logits, can be large), so the
+    dequantized cls scores frequently overflow [0,1] (or get clipped near 0
+    if the scale is dominated by reg). When we observe that, push them back
+    through a sigmoid so :func:`decode_nanodet_output`'s confidence threshold
+    is meaningful.
+    """
+    arr = np.asarray(output)
+    if arr.size == 0 or arr.ndim < 2:
+        return arr
+    last = arr.shape[-1] if arr.ndim >= 2 else None
+    if last is None:
+        return arr
+    # Determine whether channels are last-dim (priors, ch) vs first-dim
+    # (channels, priors). The decoder handles transposition, but the cls
+    # channels are always the leading num_classes channels in the ch axis.
+    ch_axis = -1 if last == num_classes + 4 * (DEFAULT_REG_MAX + 1) else 0
+    cls_slice: tuple = (slice(None),) * (arr.ndim - 1) + (slice(0, num_classes),)
+    if ch_axis == 0:
+        # transposed layout: (..., channels, priors)
+        cls_slice = (Ellipsis, slice(0, num_classes), slice(None))
+    cls = arr[cls_slice]
+    if cls.size == 0:
+        return arr
+    if float(cls.min()) >= 0.0 and float(cls.max()) <= 1.0:
+        return arr
+    sig = 1.0 / (1.0 + np.exp(-cls.astype(np.float32)))
+    arr = arr.copy()
+    arr[cls_slice] = sig
+    return arr
+
+
 def remap_nanodet_detections_to_cat_only(
     detections: Sequence[Sequence[float]],
     imgsz: int,
@@ -301,6 +343,7 @@ class NanodetAdapter:
         backend: str | None = None,
         session_factory: Callable[..., Any] | None = None,
         torch_factory: Callable[..., Any] | None = None,
+        interpreter_factory: Callable[..., Any] | None = None,
     ) -> None:
         self.model_path = model_path
         self.imgsz = imgsz
@@ -312,18 +355,28 @@ class NanodetAdapter:
         self.strides = tuple(strides)
         self.target_class = target_class
         if backend is None:
-            backend = "onnx" if _is_onnx_path(model_path) else "pytorch"
+            if _is_tflite_path(model_path):
+                backend = "tflite"
+            elif _is_onnx_path(model_path):
+                backend = "onnx"
+            else:
+                backend = "pytorch"
         self.backend = backend
 
         self._session = None
         self._input_name: str | None = None
         self._torch_model = None
+        self._interpreter = None
+        self._tflite_input_detail: dict | None = None
+        self._tflite_output_detail: dict | None = None
         self._cached_params: int = 0
 
         if backend == "onnx":
             self._init_onnx(session_factory)
         elif backend == "pytorch":
             self._init_pytorch(torch_factory)
+        elif backend == "tflite":
+            self._init_tflite(interpreter_factory)
         else:
             raise ValueError(f"unsupported nanodet backend: {backend!r}")
 
@@ -380,6 +433,51 @@ class NanodetAdapter:
         except Exception:
             self._cached_params = 0
 
+    def _init_tflite(
+        self, interpreter_factory: Callable[..., Any] | None
+    ) -> None:
+        """Boot a tf.lite Interpreter for the (possibly-INT8) NanoDet model.
+
+        US-009 produces a NanoDet-Plus-m INT8 .tflite via the same
+        ``onnx2tf`` -> ``tf.lite.TFLiteConverter`` pipeline as YOLOv8n US-004.
+        The model has ONE output tensor of shape
+        ``(1, num_priors, num_classes + 4*(reg_max+1))`` (or its transpose) —
+        same as the ONNX path. We dequantize the int8 output and feed the
+        existing :func:`decode_nanodet_output` decoder.
+        """
+        if interpreter_factory is not None:
+            self._interpreter = interpreter_factory(self.model_path)
+        else:
+            try:
+                from tensorflow.lite.python.interpreter import (  # type: ignore
+                    Interpreter,
+                    OpResolverType,
+                )
+            except Exception:
+                try:
+                    from tflite_runtime.interpreter import Interpreter  # type: ignore
+
+                    OpResolverType = None  # type: ignore
+                except Exception as exc:
+                    raise ImportError(
+                        "tensorflow-cpu (>=2.15) or tflite-runtime is required "
+                        "for the NanoDet TFLite backend"
+                    ) from exc
+            # Skip XNNPACK delegate. NanoDet's INT8 export contains a Pad-after-
+            # Conv pattern that XNNPACK fails to lower (observed:
+            # "Node N (TfLiteXNNPackDelegate) failed to prepare"). The built-in
+            # reference ops handle the same graph correctly.
+            kwargs: dict[str, Any] = {"model_path": self.model_path, "num_threads": 1}
+            if OpResolverType is not None:
+                kwargs["experimental_op_resolver_type"] = (
+                    OpResolverType.BUILTIN_WITHOUT_DEFAULT_DELEGATES
+                )
+            self._interpreter = Interpreter(**kwargs)
+        self._interpreter.allocate_tensors()  # type: ignore[union-attr]
+        self._tflite_input_detail = self._interpreter.get_input_details()[0]  # type: ignore[union-attr]
+        self._tflite_output_detail = self._interpreter.get_output_details()[0]  # type: ignore[union-attr]
+        self._cached_params = self._count_tflite_params()
+
     def _count_onnx_params(self) -> int:
         try:
             import onnx  # type: ignore
@@ -398,7 +496,68 @@ class NanodetAdapter:
     def predict(self, frame: np.ndarray) -> list[dict]:
         if self.backend == "onnx":
             return self._predict_onnx(frame)
+        if self.backend == "tflite":
+            return self._predict_tflite(frame)
         return self._predict_pytorch(frame)
+
+    def _count_tflite_params(self) -> int:
+        try:
+            total = 0
+            for t in self._interpreter.get_tensor_details():  # type: ignore[union-attr]
+                shape = t.get("shape", [])
+                if len(shape) > 0 and t.get("quantization", (0.0, 0))[0] != 0:
+                    n = 1
+                    for d in shape:
+                        n *= int(d)
+                    total += n
+            return int(total)
+        except Exception:
+            return 0
+
+    def _predict_tflite(self, frame: np.ndarray) -> list[dict]:
+        x = _preprocess(frame, self.imgsz)
+        # onnx2tf produces NHWC layout; the converter rewrites the input to
+        # NHWC even though our preprocess outputs NCHW. Transpose to match
+        # what the interpreter expects.
+        in_detail = self._tflite_input_detail or {}
+        in_shape = list(in_detail.get("shape", x.shape))
+        if len(in_shape) == 4 and in_shape[-1] == 3:
+            x = np.transpose(x, (0, 2, 3, 1))
+        in_dt = in_detail.get("dtype", np.float32)
+        if in_dt == np.int8:
+            scale, zero = in_detail.get("quantization", (0.0, 0))
+            if scale and scale != 0:
+                x = (x / scale + zero).round().astype(np.int8)
+            else:
+                x = x.astype(np.int8)
+        else:
+            x = x.astype(in_dt)
+        self._interpreter.set_tensor(in_detail["index"], x)  # type: ignore[union-attr]
+        self._interpreter.invoke()  # type: ignore[union-attr]
+        out_detail = self._tflite_output_detail or {}
+        raw = self._interpreter.get_tensor(out_detail["index"])  # type: ignore[union-attr]
+        if raw.dtype in (np.int8, np.uint8):
+            scale, zero = out_detail.get("quantization", (0.0, 0))
+            if scale and scale != 0:
+                deq = (raw.astype(np.float32) - zero) * scale
+            else:
+                deq = raw.astype(np.float32)
+        else:
+            deq = raw.astype(np.float32)
+        # The post-quant cls scores are no longer in [0,1] (the converter folds
+        # the output sigmoid into the per-tensor scale/zero-point), so apply a
+        # sigmoid before threshold + NMS to land back in score-space.
+        deq = _post_quant_score_normalize(deq, num_classes=self.num_classes)
+        return decode_nanodet_output(
+            deq,
+            imgsz=self.imgsz,
+            confidence_threshold=self.confidence_threshold,
+            iou_threshold=self.iou_threshold,
+            target_class=self.target_class,
+            num_classes=self.num_classes,
+            reg_max=self.reg_max,
+            strides=self.strides,
+        )
 
     def _predict_onnx(self, frame: np.ndarray) -> list[dict]:
         x = _preprocess(frame, self.imgsz)

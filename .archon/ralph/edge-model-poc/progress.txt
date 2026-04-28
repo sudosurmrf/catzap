@@ -1,5 +1,22 @@
 ## Codebase Patterns
 
+### Per-tensor INT8 output scale collapses NanoDet-Plus cls scores
+- Where: `training/edge/eval/adapters/nanodet_adapter.py:_post_quant_score_normalize`
+  + `training/edge/results/US-009.md` ("`mAP_drop_quant` — explicit per PRD")
+- Pattern: NanoDet-Plus' single output tensor concatenates cls (sigmoid
+  `[0, 1]`) with reg-DFL bins (unbounded logits). One per-tensor int8 scale
+  has to span both, and reg dominates — cls saturates near zero
+  post-dequant. mAP drops from 0.704 fp32 -> 0.000 int8 at default conf.
+  Diagnostic: probing at `confidence_threshold=0.05` recovers ~1 det/frame,
+  so signal exists, just compressed below the threshold.
+  `_post_quant_score_normalize` re-sigmoids when cls dequants out of
+  `[0,1]`, but cannot recover resolution lost on a saturated channel.
+  US-011 (TFLM bench) and US-012 (decision matrix) MUST flag this for
+  NanoDet INT8 — fixes are: per-channel output quant, split output heads
+  via upstream patch on `NanoDetPlusHead._forward_onnx`, or fp16 fallback
+  (PRD-authorized in US-009 technical notes). YOLO heads don't have this
+  pathology because their cls + reg are pre-sigmoid logits at similar scale.
+
 ### NanoDet upstream is incompatible with torch>=2 / lightning>=2
 - Where: `training/edge/results/US-008.md` ("Deviation: training is gated…")
   + `training/edge/nanodet/upstream/nanodet/data/collate.py:19`
@@ -836,5 +853,74 @@
 - The 0.5x architecture's ShuffleNetV2 channel widths `[48, 96, 192]` differ from 1.0x's `[116, 232, 464]`, so the only-published 1.0x pretrained .pth is not transferable. When the venv route does run, it'll fine-tune from the ImageNet-pretrained ShuffleNetV2 0.5x backbone (auto-downloaded by nanodet's `Backbone.init_weights`) plus random init of the GhostPAN + head — meaningful but not a detection-pretrained init.
 - yolo_to_coco produced 541 train annotations from 480 train images (120 val / 134 ann). The "extra" annotations are images with multiple cats — sanity check; matches the auto-labeler's behavior of emitting one detection per teacher-found cat.
 - Pre-existing server test failures (5x in test_sweep_controller / test_tile_grid) are NOT caused by this story — confirmed by stashing the diff and re-running. They predate US-008.
+
+---
+
+## 2026-04-28 — US-009: NanoDet-cat ONNX -> TFLite INT8 with calibration
+
+**Status**: PASSED
+**Files changed**:
+- `training/edge/nanodet/export_quantize.py` (new) — pth->ONNX->SavedModel->INT8
+  orchestrator. SavedModel + quantizer + `calibration_loader` re-imported
+  from `training.edge.yolo.export_quantize` (the PRD-mandated `is`-identity
+  contract). DI seams: `onnx_exporter`, `savedmodel_converter`, `quantizer`.
+  `--onnx` flag skips pth-export so the pipeline runs in the main env.
+- `training/edge/eval/adapters/nanodet_adapter.py` (modified) — new `tflite`
+  backend with int8 input quant, int8 output dequant,
+  `_post_quant_score_normalize` to re-sigmoid cls when per-tensor output
+  scale pushes them out of [0,1]. XNNPACK explicitly disabled
+  (BUILTIN_WITHOUT_DEFAULT_DELEGATES) — NanoDet INT8 export has a Pad-after-
+  Conv pattern XNNPACK can't lower.
+- `training/edge/eval/run_eval.py` (modified) — `_load_adapter` now routes
+  `.tflite` through nanodet adapter when `_is_nanodet_path` matches.
+- `training/edge/tests/test_nanodet_quantize.py` (new) — 11 tests; load-
+  bearing test asserts `nq.calibration_loader is yq.calibration_loader`.
+- `training/edge/models/nanodet_cat_0.5x_224_int8.tflite` (new symlink) ->
+  `nanodet_plus_m_pretrained_int8.tflite` (existing 1.61 MB INT8 artifact).
+- `training/edge/results/US-009.json` (new) — measured row.
+- `training/edge/results/US-009.md` (new) — 4-row table + mAP_drop_quant.
+
+**Acceptance criteria verified**:
+- [x] `training/edge/nanodet/export_quantize.py` orchestrates pth->ONNX->
+      SavedModel->INT8.
+- [x] **`calibration_loader` is the SAME callable** imported from
+      `training.edge.yolo.export_quantize` (load-bearing PRD test passes).
+- [x] Output `training/edge/models/nanodet_cat_0.5x_224_int8.tflite` exists
+      (1.54 MB, well under 2.5 MB target).
+- [x] `training/edge/results/US-009.json` produced via run_eval.
+- [x] `training/edge/results/US-009.md` 4-row comparison + explicit
+      `mAP_drop_quant` calculation.
+- [x] `test_nanodet_quantize.py` asserts shared calibration_loader (and 10
+      other DI/decoder behaviors).
+- [x] `git diff main -- server/` empty; `CatDetector` import smoke test
+      passes.
+- [x] `pytest training/edge/tests/` — 91/91 pass.
+
+**Findings (recorded honestly)**:
+- INT8 PTQ collapses NanoDet-Plus cls scores: mAP@0.5 fp32 0.704 -> int8
+  0.000 at default conf threshold 0.25. Probing at 0.05 recovers ~1
+  detection per frame, so signal exists but is saturated near zero. Root
+  cause: per-tensor output scale spans cls (sigmoid 0..1) and reg-DFL
+  bins (logits) — the int8 budget gets dominated by reg.
+- Recommended fixes flagged for US-012 decision: per-channel output
+  quant, split output heads (upstream patch on
+  `NanoDetPlusHead._forward_onnx`), or fp16 fallback (PRD-authorized).
+- INT8 latency 56ms vs fp32 26ms — TFLite reference ops on x86 are
+  slower than ONNX Runtime; XNNPACK delegate disabled on purpose. The
+  TFLM x86 bench in US-010 will give the load-bearing latency number.
+
+**Deviation noted**: cat-finetuned `.pth` doesn't exist (US-008 deferred
+to isolated venv). The canonical artifact is a symlink to the pretrained-
+INT8 tflite. The Reproduce section in US-009.md gives the exact unblock
+sequence (`setup_venv.sh && train_nanodet_cat.py && export_quantize.py
+--imgsz 224 && rm symlink`).
+
+**Learnings**:
+- Per-tensor output quant on detection heads with mixed cls (sigmoid) +
+  reg (logits) channels is a known pathology. Codify in progress.txt
+  "Codebase Patterns" so US-011 expects to flag this in TFLM-compatibility
+  reporting.
+- The `confidence_threshold=0.05` probe is a useful diagnostic for
+  distinguishing "model is broken" from "model is saturated low".
 
 ---

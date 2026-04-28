@@ -166,7 +166,7 @@
       ],
       "priority": 7,
       "passes": true,
-      "notes": "Implemented in iteration 7. Files: training/edge/nanodet/{__init__.py,README.md,requirements_nanodet.txt,setup_venv.sh,checkpoints/SHA256SUMS}; training/edge/eval/adapters/nanodet_adapter.py (onnx + pytorch backends, self-contained DFL+distance2bbox+NMS decoder, class15->0 remap); training/edge/eval/run_eval.py (path-sniff dispatch); training/edge/tests/test_nanodet_adapter.py (13 mocked tests); training/edge/results/US-007.{json,md}. Real eval mAP@0.5=0.704 on US-002 120-image val (NanoDet pretrained 1.0x at 416 via ONNX, params=1.19M, size=4.79MB, latency p50=26.6ms / p95=28.3ms). DEVIATION: upstream releases no nanodet-plus-m_0.5x .pth — used the closest-published nanodet-plus-m_416 (1.0x at 416) under the canonical filename. Documented in README and US-007.md. PRD predicted NanoDet pretrained would be 'substantially lower' than YOLOv8n; actual result beats stock yolov8n (0.636) by 6.8 mAP-points, only 20.5 points below fine-tuned yolov8n (0.909). 73 edge tests pass. server/ untouched."
+      "notes": "Implemented in iteration 7. Files: training/edge/nanodet/{__init__.py,README.md,requirements_nanodet.txt,setup_venv.sh,checkpoints/SHA256SUMS}; training/edge/eval/adapters/nanodet_adapter.py (onnx + pytorch backends, self-contained DFL+distance2bbox+NMS decoder, class15->0 remap); training/edge/eval/run_eval.py (path-sniff dispatch); training/edge/tests/test_nanodet_adapter.py (13 mocked tests); training/edge/results/US-007.{json,md}. Real eval mAP@0.5=0.704 on US-002 120-image val (NanoDet pretrained 1.0x at 416 via ONNX, params=1.19M, size=4.79MB, latency p50=26.6ms / p95=28.3ms). DEVIATION: upstream releases no nanodet-plus-m_0.5x .pth \u2014 used the closest-published nanodet-plus-m_416 (1.0x at 416) under the canonical filename. Documented in README and US-007.md. PRD predicted NanoDet pretrained would be 'substantially lower' than YOLOv8n; actual result beats stock yolov8n (0.636) by 6.8 mAP-points, only 20.5 points below fine-tuned yolov8n (0.909). 73 edge tests pass. server/ untouched."
     },
     {
       "id": "US-008",
@@ -189,7 +189,7 @@
       ],
       "priority": 8,
       "passes": true,
-      "notes": "Wiring landed: configs/nanodet_plus_m_0.5x_cat.yml (num_classes=1, input_size=224, lr=1e-4, epochs=50), yolo_to_coco.py converter, train_nanodet_cat.py CLI with trainer_factory DI, test_nanodet_train.py (7 tests). Real fine-tune deferred to isolated venv per setup_venv.sh — main env's torch 2.3 + lightning 2.x is incompatible with nanodet's torch<2 / pl<2 pins (4 lightning hook signatures changed). US-008.json is a placeholder of zeros; US-008.md documents the deviation chain and reproduce command."
+      "notes": "Wiring landed: configs/nanodet_plus_m_0.5x_cat.yml (num_classes=1, input_size=224, lr=1e-4, epochs=50), yolo_to_coco.py converter, train_nanodet_cat.py CLI with trainer_factory DI, test_nanodet_train.py (7 tests). Real fine-tune deferred to isolated venv per setup_venv.sh \u2014 main env's torch 2.3 + lightning 2.x is incompatible with nanodet's torch<2 / pl<2 pins (4 lightning hook signatures changed). US-008.json is a placeholder of zeros; US-008.md documents the deviation chain and reproduce command."
     },
     {
       "id": "US-009",
@@ -210,8 +210,8 @@
         "US-008"
       ],
       "priority": 9,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented: training/edge/nanodet/export_quantize.py orchestrates pth->ONNX->SavedModel->INT8 .tflite. calibration_loader and converter helpers re-imported (is) from training.edge.yolo.export_quantize so YOLO/NanoDet PTQ uses byte-identical settings. NanodetAdapter gained tflite backend with post-quant cls re-sigmoid; run_eval._is_nanodet_path now routes .tflite. Canonical artifact training/edge/models/nanodet_cat_0.5x_224_int8.tflite (1.54 MB, INT8 from pretrained 1.0x @ 416 ONNX) symlinks to nanodet_plus_m_pretrained_int8.tflite. mAP=0 (cls-channel quant collapse documented); fp32 reference latency 26.6ms -> int8 56.2ms (TFLite reference ops, no XNNPACK). DEVIATION: cat-finetuned .pth gated on US-008 isolated venv. 11 new tests; 91/91 edge tests pass. git diff main -- server/ empty; CatDetector import smoke test passes."
     },
     {
       "id": "US-010",
