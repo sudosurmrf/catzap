@@ -173,6 +173,16 @@ async def run_vision_loop(app_state: dict):
         dev_mode=settings.dev_mode,
     )
 
+    # Start the sweep from the servo's physical boot position (90, 45)
+    # so the first goto is a 0-degree no-op instead of a 60-degree slam.
+    # _sync_sweep_to_current_position recalculates _sweep_t so the
+    # boustrophedon continues naturally from the boot position.
+    _sweep_controller.current_pan = 90.0
+    _sweep_controller.current_tilt = 45.0
+    _sweep_controller._sync_sweep_to_current_position()
+    _actuator._last_sent_pan = 90
+    _actuator._last_sent_tilt = 45
+
     # Per-cat identity classifier is disabled. The YOLO detector still
     # detects "is this a cat" — we just skip the second-stage MobileNet
     # classifier that maps a crop to a specific cat name. Frees ~50-200ms
@@ -184,6 +194,11 @@ async def run_vision_loop(app_state: dict):
     last_time = time.time()
     frame_count = 0
     cached_pano_b64: str | None = None
+
+    # Startup stabilization: ignore detections for the first ~2 seconds so
+    # camera auto-exposure artifacts don't cause phantom-cat tracking jumps
+    # that whip the servos around before the feed has settled.
+    _warmup_frames_remaining = 20
 
     # Zone cache: pulled from DB only when the version counter bumps. Avoids
     # an async pool acquire on every iteration of the vision loop.
@@ -233,6 +248,9 @@ async def run_vision_loop(app_state: dict):
         nonlocal _latest_raw_dets, _latest_inf_pan, _latest_inf_tilt, _new_results_ready
         global _cached_identities
 
+        _det_latencies_ms: list[float] = []
+        _last_latency_log = time.perf_counter()
+
         while not _infer_stop.is_set():
             try:
                 job = _infer_queue.get(timeout=0.5)
@@ -241,7 +259,22 @@ async def run_vision_loop(app_state: dict):
             inf_frame, inf_servo_pan, inf_servo_tilt, do_classify = job
 
             try:
+                _det_t0 = time.perf_counter()
                 raw_dets = detector.detect(inf_frame)
+                _det_latencies_ms.append((time.perf_counter() - _det_t0) * 1000.0)
+
+                _now_log = time.perf_counter()
+                if _now_log - _last_latency_log >= 10.0 and _det_latencies_ms:
+                    _samples = sorted(_det_latencies_ms)
+                    _n = len(_samples)
+                    _p50 = _samples[_n // 2]
+                    _p95 = _samples[min(_n - 1, int(_n * 0.95))]
+                    logger.info(
+                        f"YOLO detect latency (n={_n}, last ~10s): "
+                        f"p50={_p50:.1f}ms p95={_p95:.1f}ms max={_samples[-1]:.1f}ms"
+                    )
+                    _det_latencies_ms.clear()
+                    _last_latency_log = _now_log
 
                 # Classify cats if due
                 if do_classify and _classifier is not None and _classifier.model is not None:
@@ -304,7 +337,7 @@ async def run_vision_loop(app_state: dict):
     try:
         while app_state.get("running", True):
             now = time.time()
-            dt = now - last_time
+            dt = min(now - last_time, 0.5)
             last_time = now
 
             # Advance state machine
@@ -532,7 +565,11 @@ async def run_vision_loop(app_state: dict):
                         violations[0]["overlap"],
                     )
 
-            if engagement_target is not None:
+            # During warmup, let the sweep run and the UI see detections,
+            # but don't drive servo targeting from them.
+            if _warmup_frames_remaining > 0:
+                _warmup_frames_remaining -= 1
+            elif engagement_target is not None:
                 tgt_pan, tgt_tilt, zone_name, v_det, overlap = engagement_target
                 _sweep_controller.on_cat_in_zone(tgt_pan, tgt_tilt, zone_name)
 

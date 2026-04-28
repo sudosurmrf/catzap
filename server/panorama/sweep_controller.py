@@ -177,11 +177,36 @@ class SweepController:
             # engagement_grace_ms. Return to sweep (or to queued pause).
             grace_elapsed_ms = (now - self._last_cat_seen_time) * 1000.0
             if grace_elapsed_ms >= self.engagement_grace_ms:
+                self._sync_sweep_to_current_position()
                 if self.pause_queued:
                     self.state = SweepState.PAUSED
                     self.pause_queued = False
                 else:
                     self.state = SweepState.SWEEPING
+
+    def _sync_sweep_to_current_position(self) -> None:
+        """Recompute _sweep_t so the boustrophedon resumes from the nearest
+        point to (current_pan, current_tilt) instead of from the stale
+        position where the sweep was interrupted. Without this, the camera
+        would teleport back to wherever it was when it first left SWEEPING
+        — potentially 30-60 degrees away."""
+        d0, d1, d2, d3 = self._phase_durations
+        pan_range = self.pan_max - self.pan_min
+        if pan_range <= 0:
+            self._sweep_t = 0.0
+            return
+
+        dist_top = abs(self.current_tilt - self._tilt_top)
+        dist_bottom = abs(self.current_tilt - self._tilt_bottom)
+
+        if dist_top <= dist_bottom:
+            # Nearest to phase 0 (L→R at tilt_top)
+            frac = max(0.0, min(1.0, (self.current_pan - self.pan_min) / pan_range))
+            self._sweep_t = frac * d0
+        else:
+            # Nearest to phase 2 (R→L at tilt_bottom)
+            frac = max(0.0, min(1.0, (self.pan_max - self.current_pan) / pan_range))
+            self._sweep_t = d0 + d1 + frac * d2
 
     def _clamp_target(self, cat_pan: float, cat_tilt: float) -> tuple[float, float]:
         """Clamp a tracking target to the operational envelope so the

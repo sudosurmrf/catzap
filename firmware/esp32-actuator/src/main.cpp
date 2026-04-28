@@ -44,6 +44,18 @@ int currentTilt = BOOT_TILT_ANGLE;
 static bool g_trigger_active = false;       // true while trigger servo is held in fire position
 static unsigned long g_trigger_release_ms = 0;  // millis() at which to release the trigger
 
+// ───── Move-and-kill: zero LEDC duty after idle to stop jitter ─────
+// Servos stay permanently attach()'d so the LEDC channel is never torn
+// down. To silence jitter we set the channel duty to 0 (pin stays low,
+// no pulses). servo.write() resumes correct output instantly — no
+// re-init, no glitch pulse, no mechanical snap.
+#define SERVO_IDLE_MS 1500
+
+static unsigned long g_last_servo_cmd_ms = 0;
+static bool g_servos_quiet = false;
+static int g_pan_channel = -1;
+static int g_tilt_channel = -1;
+
 // ───── Log ring buffer ──────────────────────────────────────────────
 // In-RAM circular buffer of recent log lines, exposed over HTTP at /logs.
 // This is how we see what the ESP32 was doing before a crash or anomaly
@@ -145,6 +157,8 @@ void handleAim() {
     tiltServo.write(tilt);
     currentPan = pan;
     currentTilt = tilt;
+    g_last_servo_cmd_ms = millis();
+    g_servos_quiet = false;
 
     logLine("aim: pan=%d tilt=%d", pan, tilt);
 
@@ -219,6 +233,8 @@ void handleGoto() {
     tiltServo.write(tilt);
     currentPan = pan;
     currentTilt = tilt;
+    g_last_servo_cmd_ms = millis();
+    g_servos_quiet = false;
 
     logLine("goto: pan=%d tilt=%d", pan, tilt);
 
@@ -231,7 +247,11 @@ void handleGoto() {
 }
 
 void handleStop() {
-    // Hold current position (servos already hold)
+    if (g_pan_channel >= 0) ledcWrite(g_pan_channel, 0);
+    if (g_tilt_channel >= 0) ledcWrite(g_tilt_channel, 0);
+    g_servos_quiet = true;
+    logLine("stop: pwm silenced, pan=%d tilt=%d", currentPan, currentTilt);
+
     String response;
     JsonDocument doc;
     doc["stopped"] = true;
@@ -305,9 +325,10 @@ void setup() {
     pinMode(STATUS_LED_PIN, OUTPUT);
     digitalWrite(STATUS_LED_PIN, LOW);
 
-    panServo.attach(PAN_SERVO_PIN);
-    tiltServo.attach(TILT_SERVO_PIN);
+    g_pan_channel = panServo.attach(PAN_SERVO_PIN);
+    g_tilt_channel = tiltServo.attach(TILT_SERVO_PIN);
     triggerServo.attach(TRIGGER_SERVO_PIN);
+    g_last_servo_cmd_ms = millis();
     panServo.write(BOOT_PAN_ANGLE);
     tiltServo.write(BOOT_TILT_ANGLE);
     triggerServo.write(TRIGGER_REST_ANGLE);
@@ -374,6 +395,17 @@ void loop() {
         digitalWrite(STATUS_LED_PIN, LOW);
         g_trigger_active = false;
         logLine("trigger released");
+    }
+
+    // Move-and-kill: zero LEDC duty after idle to silence jitter.
+    // Servos stay attached — only the PWM output goes quiet. The next
+    // servo.write() sets the correct duty instantly, no re-init needed.
+    if (!g_servos_quiet &&
+        (long)(millis() - g_last_servo_cmd_ms) >= SERVO_IDLE_MS) {
+        if (g_pan_channel >= 0) ledcWrite(g_pan_channel, 0);
+        if (g_tilt_channel >= 0) ledcWrite(g_tilt_channel, 0);
+        g_servos_quiet = true;
+        logLine("idle quiet: pan=%d tilt=%d", currentPan, currentTilt);
     }
 
     server.handleClient();
