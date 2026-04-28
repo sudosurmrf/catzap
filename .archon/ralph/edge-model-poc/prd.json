@@ -165,8 +165,8 @@
         "US-001"
       ],
       "priority": 7,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented in iteration 7. Files: training/edge/nanodet/{__init__.py,README.md,requirements_nanodet.txt,setup_venv.sh,checkpoints/SHA256SUMS}; training/edge/eval/adapters/nanodet_adapter.py (onnx + pytorch backends, self-contained DFL+distance2bbox+NMS decoder, class15->0 remap); training/edge/eval/run_eval.py (path-sniff dispatch); training/edge/tests/test_nanodet_adapter.py (13 mocked tests); training/edge/results/US-007.{json,md}. Real eval mAP@0.5=0.704 on US-002 120-image val (NanoDet pretrained 1.0x at 416 via ONNX, params=1.19M, size=4.79MB, latency p50=26.6ms / p95=28.3ms). DEVIATION: upstream releases no nanodet-plus-m_0.5x .pth — used the closest-published nanodet-plus-m_416 (1.0x at 416) under the canonical filename. Documented in README and US-007.md. PRD predicted NanoDet pretrained would be 'substantially lower' than YOLOv8n; actual result beats stock yolov8n (0.636) by 6.8 mAP-points, only 20.5 points below fine-tuned yolov8n (0.909). 73 edge tests pass. server/ untouched."
     },
     {
       "id": "US-008",

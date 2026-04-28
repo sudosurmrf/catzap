@@ -1,5 +1,50 @@
 ## Codebase Patterns
 
+### Path-sniff dispatch in run_eval._load_adapter
+- Where: `training/edge/eval/run_eval.py:_load_adapter` +
+  `training/edge/eval/run_eval.py:_is_nanodet_path`
+- Pattern: when a new model family lands, route on file path rather than
+  adding a new `--format` enum value. NanoDet checkpoints under
+  `training/edge/nanodet/` (or named `nanodet_*` under the shared models
+  dir) auto-route to nanodet_adapter regardless of `--format`. Keeps the
+  PRD-shaped CLI (`--format pytorch`) working uniformly across
+  YOLO and NanoDet, and avoids touching any caller. Same approach extends
+  cleanly to future families.
+
+### NanoDet-Plus ONNX output decode (self-contained, no nanodet pip)
+- Where: `training/edge/eval/adapters/nanodet_adapter.py:decode_nanodet_output`
+- Pattern: NanoDet-Plus' ONNX export
+  (`nanodet.model.head.NanoDetPlusHead._forward_onnx`) emits a single
+  tensor `(1, num_priors, num_classes + 4*(reg_max+1))` with cls already
+  sigmoid'd. Decode: split channels, reshape reg to `(N, 4, reg_max+1)`,
+  softmax over the bin axis and project onto `[0..reg_max]` (the DFL
+  projection), multiply by per-row stride from `_generate_center_priors`,
+  apply `distance2bbox(center, [l,t,r,b])`, NMS within the cat (id 15)
+  channel, normalize by imgsz. This lets the main env eval pure ONNX with
+  NO nanodet pip dependency — the upstream Python package is only needed
+  for the .pth backend (lazy-imported, isolated venv).
+
+### NanoDet 0.5x pretrained checkpoint deviation
+- Where: `training/edge/nanodet/README.md` ("Pretrained checkpoint" section)
+  + `training/edge/results/US-007.md`
+- Pattern: upstream's GitHub releases publish only `nanodet-plus-m`
+  (1.0x) and `nanodet-plus-m-1.5x` at 320/416 — no 0.5x pretrained .pth
+  exists despite the legacy 0.5x configs. US-007's spec command line is
+  honored via a symlink at the canonical filename
+  `checkpoints/nanodet_plus_m_0.5x_pretrained.{onnx,pth}` pointing at
+  `nanodet-plus-m_416_checkpoint.{ckpt,onnx}` (1.0x at 416). US-008 will
+  decide whether to truly fine-tune at 0.5x width or stay at 1.0x.
+
+### NanoDet-Plus preprocess uses BGR mean/std on RGB pixels
+- Where: `training/edge/eval/adapters/nanodet_adapter.py:_preprocess`
+- Pattern: NanoDet's YAML configs list `mean=[103.53, 116.28, 123.675]` and
+  `std=[57.375, 57.12, 58.395]` in **BGR** order (matching cv2's default
+  channel order), but apply them after a BGR->RGB conversion. Net effect:
+  mean/std are reversed before normalization so the values line up with
+  the RGB pixel order. Also: pixels stay in `[0, 255]` (NO divide-by-255
+  step before normalize). Getting either of these wrong drops the
+  pretrained mAP from ~0.7 to <0.05 on this val set.
+
 ### KD as cls-quantization-recovery lever (PTQ collapse partial fix)
 - Where: `training/edge/yolo/distill_train.py` + `training/edge/results/US-006.md`
 - Pattern: Where US-004's PTQ produced mAP=0 and US-005's QAT couldn't
@@ -641,5 +686,74 @@
   a single RTX 4090 took ~75s. That's negligibly slower than US-003's
   plain fine-tune (~70s) — the teacher's frozen forward is cheap at
   yolov8s scale, single-forward patching keeps the overhead near zero.
+
+---
+
+## 2026-04-28 — US-007: NanoDet-Plus pretrained baseline through eval harness
+
+**Status**: PASSED
+**Files changed**:
+- training/edge/nanodet/__init__.py + README.md + requirements_nanodet.txt
+  + setup_venv.sh + checkpoints/SHA256SUMS — isolated-venv scaffold
+- training/edge/eval/adapters/nanodet_adapter.py — onnx + pytorch backends,
+  self-contained DFL+distance2bbox+NMS decoder, COCO 15 -> single-class 0 remap
+- training/edge/eval/run_eval.py — _is_nanodet_path + _load_adapter dispatch
+- training/edge/tests/test_nanodet_adapter.py — 13 mocked pytest cases
+- training/edge/results/US-007.{json,md} — real eval at mAP=0.704
+- .gitignore — exclude downloaded NanoDet checkpoints + upstream clone
+
+**Acceptance criteria verified**:
+- [x] training/edge/nanodet/{README.md, requirements_nanodet.txt, setup_venv.sh}
+- [x] Pretrained checkpoint + SHA256 (closest-published 1.0x at 416 used per
+      documented deviation: upstream releases no 0.5x .pth)
+- [x] training/edge/eval/adapters/nanodet_adapter.py with predict() interface
+- [x] Adapter remaps class_id=15 -> 0, drops other COCO classes (covered by
+      test_remap_drops_non_cat_classes_and_remaps_to_id_zero +
+      test_decode_returns_empty_on_other_class_dominated_output +
+      test_nanodet_adapter_pytorch_backend_uses_torch_factory)
+- [x] python -m training.edge.eval.run_eval --model
+      training/edge/nanodet/checkpoints/nanodet_plus_m_0.5x_pretrained.onnx
+      --format pytorch --story-id US-007 --val-dir training/edge/data/labeled/val/
+      --imgsz 416 produced training/edge/results/US-007.json
+- [x] training/edge/results/US-007.md with pretrained-vs-finetuned compare
+      and explicit narrative for the unexpected finding (NanoDet beats stock
+      yolov8n)
+- [x] test_nanodet_adapter.py — 13 cases, all green
+- [x] git diff main -- server/ is empty (0 lines)
+- [x] CatDetector import smoke test passes
+- [x] pytest -p no:asyncio training/edge/tests/ — 73 passed (60 + 13)
+
+**Real measured numbers (US-007)**:
+  mAP@0.5 = 0.704, params = 1,186,417 (ONNX initializers), size = 4,793,616 B
+  (4.79 MB), latency p50 = 26.62 ms, p95 = 28.31 ms, val_images = 120,
+  imgsz = (416, 416), backend = onnxruntime CPU single-thread.
+
+**Learnings**:
+- The PRD predicted "NanoDet pretrained mAP@0.5 ... substantially lower than
+  YOLOv8n baseline (because NanoDet is general-purpose COCO and not
+  cat-finetuned)". REAL RESULT: NanoDet pretrained 0.704 BEATS stock
+  yolov8n 0.636 on the same 120-image US-002 val by 6.8 mAP-points,
+  despite being a smaller model (1.19 M vs 3.16 M params). The larger
+  input (416 vs 224) and denser detection grid (3598 priors) offset the
+  smaller backbone. This shifts US-008 expectations: a fine-tuned NanoDet
+  could plausibly compete with the YOLOv8n track end-to-end.
+- nanodet upstream pins torch>=1.10,<2.0 + pytorch-lightning<2.0, both
+  incompatible with the catzap main env's torch 2.3 + ultralytics 8.2.
+  The isolated-venv design is the right call. The eval-harness adapter
+  stays main-env-importable by lazy-importing nanodet only in the .pth
+  branch; the .onnx branch needs no nanodet at all.
+- Upstream releases publish nanodet-plus-m (1.0x) and nanodet-plus-m-1.5x
+  at 320/416 but NO 0.5x pretrained .pth, despite legacy 0.5x configs
+  being in the repo. Documented deviation: US-007 evaluates the
+  closest-published 1.0x at 416 under the canonical 0.5x filename
+  (symlink). Same pattern as US-002's deviation around the missing
+  ESP32-CAM stream.
+- NanoDet preprocess subtlety: mean/std are listed in BGR order in the
+  YAML configs but applied AFTER a BGR->RGB convert, AND pixels stay in
+  [0, 255] (no divide-by-255 step before normalize). Getting either
+  wrong drops mAP from ~0.7 to <0.05.
+- ONNXRuntime emits a flurry of "Initializer X appears in graph inputs"
+  warnings on this NanoDet ONNX (the upstream simplified-but-not-stripped
+  graph). Cosmetic; the model runs correctly.
 
 ---
