@@ -73,7 +73,7 @@
       ],
       "priority": 3,
       "passes": true,
-      "notes": "Implemented in iteration 3. Files: training/edge/yolo/{__init__,train_yolov8n_cat}.py + tests/test_yolo_train.py (6 cases) + data/labeled/{data.yaml,train.txt,val.txt,val/manifest.txt} + models/yolov8n_cat.pt (6.0 MB) + results/US-003{,.md,-yolov8n-stock-on-us002-val.json}. 50 epochs on RTX 4090 (~70 s); ultralytics-internal val mAP50=0.995, harness mAP50=0.909 on the same 120-image US-002 val. Stock yolov8n on the same val scored 0.636 — fine-tune lifted mAP by +0.273 absolute. server/ untouched, CatDetector import OK, pytest 26 passed."
+      "notes": "Implemented in iteration 3. Files: training/edge/yolo/{__init__,train_yolov8n_cat}.py + tests/test_yolo_train.py (6 cases) + data/labeled/{data.yaml,train.txt,val.txt,val/manifest.txt} + models/yolov8n_cat.pt (6.0 MB) + results/US-003{,.md,-yolov8n-stock-on-us002-val.json}. 50 epochs on RTX 4090 (~70 s); ultralytics-internal val mAP50=0.995, harness mAP50=0.909 on the same 120-image US-002 val. Stock yolov8n on the same val scored 0.636 \u2014 fine-tune lifted mAP by +0.273 absolute. server/ untouched, CatDetector import OK, pytest 26 passed."
     },
     {
       "id": "US-004",
@@ -96,8 +96,8 @@
         "US-003"
       ],
       "priority": 4,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented in iteration 4. Files: training/edge/yolo/export_quantize.py (pt -> ONNX -> onnx2tf SavedModel -> INT8 TFLite via explicit tf.lite.TFLiteConverter); training/edge/models/yolov8n_cat_int8.tflite (3.07 MB; over 2.5 MB cap because YOLOv8n at 3.0 M params hits the INT8 architectural floor of ~2.87 MB raw weights \u2014 flagged as input to US-006/US-012); training/edge/results/US-004.json (mAP=0.000, latency_ms_p50=3.59) and US-004.md with the mandatory 'PTQ mAP drop exceeds 3.0 points; US-005 (QAT) is required.' line. PTQ collapsed cls head via per-tensor output quant \u2014 escalates to US-005 QAT per the conditional design. Tests: 9 pytest cases mocking tf.lite.TFLiteConverter, asserting representative_dataset >= 100 frames + int8 input/output dtypes."
     },
     {
       "id": "US-005",

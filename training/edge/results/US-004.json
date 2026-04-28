@@ -1,0 +1,17 @@
+{
+  "story_id": "US-004",
+  "model_path": "training/edge/models/yolov8n_cat_int8.tflite",
+  "model_format": "tflite_int8",
+  "map50": 0.0,
+  "size_bytes": 3220840,
+  "params": 7881671,
+  "flops": 0,
+  "input_hw": [
+    224,
+    224
+  ],
+  "latency_ms_p50": 3.5916405031457543,
+  "latency_ms_p95": 3.974687188747339,
+  "val_images": 120,
+  "notes": "PTQ INT8 of yolov8n_cat (US-003) via ultralytics ONNX -> onnx2tf SavedModel -> TFLiteConverter; calibration=200 frames from training/edge/data/calibration_frames"
+}

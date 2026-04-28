@@ -1,5 +1,53 @@
 ## Codebase Patterns
 
+### TF_USE_LEGACY_KERAS=1 is mandatory before onnx2tf
+- Where: `training/edge/yolo/export_quantize.py` (top-of-module env var setdefault)
+- Pattern: TF 2.17 ships Keras 3 by default; onnx2tf uses Keras-2-style
+  symbolic tensor APIs that crash on Keras 3 with "A KerasTensor cannot be
+  used as input to a TensorFlow function". Set
+  `os.environ.setdefault('TF_USE_LEGACY_KERAS', '1')` BEFORE any TF/Keras
+  import (i.e. at module top, before lazy imports get triggered). Required
+  by US-004, US-006, US-009 — anything that uses onnx2tf.
+
+### Pre-place onnx2tf's calibration_image_sample_data .npy
+- Where: repo root `calibration_image_sample_data_20x128x128x3_float32.npy`
+  (gitignored)
+- Pattern: onnx2tf tries to download a 20×128×128×3 fp32 .npy at convert
+  time; the github-releases URL it uses is stale and the wasabi fallback
+  is flaky from many networks. Pre-creating the file in `cwd()` short-
+  circuits the download (`os.path.isfile` check at common_functions.py:4271).
+  Any random fp32 array of that shape works; we use a seeded RandomState.
+
+### YOLOv8 PTQ + per-tensor output quant collapses cls head
+- Where: documented in `training/edge/results/US-004.md` ("Failure mode")
+- Pattern: YOLOv8's monolithic Detect output `(1, 5, 1029)` mixes xywh
+  (pixel range 0..480) with cls (sigmoid 0..1) into one tensor. Naive PTQ
+  picks ONE per-tensor scale dominated by the xywh range, which compresses
+  the cls range to a single int8 bucket — every confidence becomes 0,
+  every detection is filtered out, mAP=0. Mitigations: (a) QAT (US-005),
+  (b) split Detect head into separate tensors (out of scope for US-004
+  because it requires touching ultralytics' export graph), (c) KD to a
+  smaller student (US-006). The MLIR per-channel quantizer
+  (`experimental_new_quantizer=True`) does NOT fix this — per-tensor
+  activation quant still wins on the output tensor.
+
+### Decode YOLO ONNX/TFLite output: divide xywh by imgsz
+- Where: `training/edge/eval/adapters/onnx_adapter.py:_decode_yolo_onnx`
+- Pattern: ultralytics' `boxes.xyxyn` (used by `pytorch_adapter.py`)
+  returns NORMALIZED [0,1] coordinates, but the raw ONNX/TFLite output is
+  xywh in INPUT-PIXEL coordinates (0..imgsz). Without dividing by imgsz
+  before clipping to [0,1], every box collapses to a degenerate point and
+  mAP is 0 across all eval harness format paths. The decoder now takes
+  imgsz as a third arg; both onnx_adapter and tflite_adapter pass it.
+
+### TFLite "params" reported by the eval harness over-counts
+- Where: `training/edge/eval/adapters/tflite_adapter.py:num_params`
+- Pattern: For TFLite the harness sums every quantized tensor's element
+  count (incl. bias / scale tables), so the reported figure (~7.9 M for
+  yolov8n_cat_int8) is ~2.6× the true weight count (~3.0 M). Cite the
+  PyTorch adapter's params for any narrative comparison; the TFLite count
+  is a faithful slice of stored model state, not a marketing number.
+
 ### ultralytics dataset config + flat layout
 - Where: `training/edge/yolo/train_yolov8n_cat.py:prepare_data`
 - Pattern: ultralytics' `img2label_paths` only does the `/images/` ->
@@ -269,5 +317,100 @@
   `training/edge/models/yolov8n_cat.pt` is tracked.
 - ultralytics drops `.cache` files next to dataset dirs (here:
   `training/edge/data/labeled.cache`). Also gitignored.
+
+---
+
+## 2026-04-28 — US-004: Post-training INT8 quantization (YOLOv8n-cat ONNX -> TFLite)
+
+**Status**: PASSED
+**Files changed**:
+- training/edge/yolo/export_quantize.py — pt -> ONNX (ultralytics) ->
+  TF SavedModel (onnx2tf, NHWC) -> INT8 TFLite (explicit
+  tf.lite.TFLiteConverter with optimizations=DEFAULT,
+  representative_dataset=calibration_loader, target_spec=BUILTINS_INT8,
+  inference_input_type=int8, inference_output_type=int8,
+  experimental_new_quantizer=True). DI hooks on every stage so tests run
+  without TF installed.
+- training/edge/tests/test_quantize.py — 9 mock-based pytest cases
+  covering calibration_loader (NHWC float32 [0,1] (1,224,224,3),
+  max_frames cap, missing-dir error, >=100 frames), the converter
+  (int8 dtypes, optimizations, supported_ops, output bytes written), the
+  representative_dataset receives >=100 frames, the orchestrator chains
+  3 stages, and the ONNX/SavedModel sub-steps pass correct kwargs.
+- training/edge/eval/adapters/onnx_adapter.py — _decode_yolo_onnx now
+  takes imgsz and divides xywh by it. Fixes mAP=0 for ONNX/TFLite paths.
+- training/edge/eval/adapters/tflite_adapter.py — pass self.imgsz to
+  the decoder.
+- training/edge/results/US-004.json — mAP=0.000, size=3,220,840 bytes,
+  latency p50=3.59 ms (1.65x faster than fp32 PyTorch), 120 val images.
+- training/edge/results/US-004.md — pipeline diagram, comparison table
+  vs US-003, MANDATORY 'PTQ mAP drop exceeds 3.0 points; US-005 (QAT) is
+  required.' line, size deviation note (3.07 MB vs 2.5 MB cap;
+  architectural floor ~2.87 MB), failure-mode diagnostic.
+- training/edge/requirements_edge.txt — add onnx2tf>=1.20, onnxsim>=0.4.33,
+  ai-edge-litert, tf_keras==2.17.0; keep onnx-tf as fallback.
+- .gitignore — exclude training/edge/models/*.{onnx,tflite,*.export.json}
+  and *_saved_model/ (regenerable from export_quantize), plus
+  calibration_image_sample_data_*.npy (onnx2tf's auto-download pre-cache).
+
+**Acceptance criteria verified**:
+- [x] (1) ultralytics .export(format='onnx', imgsz=224, dynamic=False,
+  simplify=True), (2) ONNX -> TF via onnx2tf (NHWC SavedModel; chosen
+  over onnx-tf, documented in module docstring + US-004.md), (3) explicit
+  tf.lite.TFLiteConverter with optimizations=[Optimize.DEFAULT],
+  representative_dataset, supported_ops=[BUILTINS_INT8],
+  inference_input_type=int8, inference_output_type=int8.
+- [x] Output written to training/edge/models/yolov8n_cat_int8.tflite.
+  Size: 3.07 MB (over the 2.5 MB cap; documented as architecturally
+  bounded by 3.0 M params * 1 byte INT8 floor; flagged for US-006 KD).
+- [x] calibration_loader yields ~200 frames as float32 [0,1] (1,224,224,3)
+  NHWC; chose NHWC because onnx2tf produces NHWC SavedModels natively.
+  Re-imported by US-009 (NanoDet) for an apples-to-apples calibration set.
+- [x] python -m training.edge.eval.run_eval ... --story-id US-004
+  --val-dir training/edge/data/labeled/val produced
+  training/edge/results/US-004.json.
+- [x] training/edge/results/US-004.md compares US-003 fp32 vs US-004
+  int8 (mAP delta = 0.909, size delta = -3.13 MB, latency delta = -2.32 ms);
+  prints mAP_drop = US-003.map50 - US-004.map50 = 0.909.
+- [x] mAP_drop > 3.0 points: required statement included verbatim.
+- [x] test_quantize.py mocks tf.lite.TFLiteConverter; asserts
+  representative_dataset is called >=100 times AND
+  inference_input_type/inference_output_type are tf.int8.
+- [x] git diff main -- server/ is empty (0 lines).
+- [x] CatDetector import smoke test passes.
+- [x] pytest -p no:asyncio training/edge/tests/ — 35 passed (12 + 8 + 6 + 9).
+
+**Learnings**:
+- TF 2.17 ships Keras 3 by default but onnx2tf needs Keras 2 APIs.
+  TF_USE_LEGACY_KERAS=1 must be set BEFORE TF/Keras imports — module-top
+  env var setdefault is the cleanest place. Without it, onnx2tf crashes
+  with "A KerasTensor cannot be used as input to a TensorFlow function".
+- onnx2tf tries to download a calibration_image_sample_data_20x128x128x3
+  .npy from github-releases at convert time; the URL was 404'ing in our
+  env. Pre-creating the file at cwd short-circuits the download. Any
+  random fp32 array of the right shape works.
+- YOLOv8 + naive PTQ produces mAP=0 because the Detect head's output
+  tensor (1,5,1029) packs xywh (pixel scale 0..480) and cls (sigmoid 0..1)
+  into one tensor. Per-tensor output quant chooses a single scale fitted
+  to xywh, which crushes cls into one int8 bucket — confidence becomes
+  identically 0 across all anchors. MLIR per-channel quantizer
+  (`experimental_new_quantizer=True`) does NOT fix this; per-tensor
+  ACTIVATION quant still applies. Real fixes: (a) QAT (US-005), (b)
+  split Detect head — out of scope here, (c) KD to smaller student
+  (US-006). Documented in US-004.md as a finding, not hidden.
+- The eval harness's onnx/tflite decoder was missing the xywh-divide-by-
+  imgsz step. ultralytics' Python `boxes.xyxyn` is normalized but raw
+  ONNX/TFLite output is in pixel coords. Fixed by passing imgsz to
+  _decode_yolo_onnx; both adapters now thread it through. This is a
+  general fix that benefits every later ONNX/TFLite eval too.
+- Size cap of 2.5 MB cannot be met for YOLOv8n at 3.0 M params: 3,011,043
+  bytes raw INT8 weights = 2.87 MB before any flatbuffer overhead. The
+  observed 3.07 MB is essentially at the floor. Going below requires
+  parameter reduction (KD/pruning), which is US-006's territory.
+- Latency dropped 1.65x (5.91 ms -> 3.59 ms p50) even on x86. The INT8
+  path is real and fast; only the cls accuracy is broken under PTQ.
+- ultralytics 8.2.0's built-in tflite export hits the SAME onnx2tf
+  KerasTensor crash without TF_USE_LEGACY_KERAS=1, so this fix benefits
+  US-006 / US-009 too.
 
 ---

@@ -7,4 +7,15 @@ onnxruntime==1.18.1
 tensorflow-cpu>=2.15,<2.18
 pycocotools==2.0.7
 thop==0.1.1.post2209072238
+# US-001 originally listed onnx-tf for ONNX -> TF conversion. US-004 switched
+# to onnx2tf because onnx2tf produces native NHWC SavedModels (the layout
+# TFLite Micro on the ESP32-S3 expects), while onnx-tf preserves NCHW and
+# would force a transpose wrapper. onnx-tf is kept as a fallback dep.
 onnx-tf==1.10.0
+onnx2tf>=1.20
+onnxsim>=0.4.33
+ai-edge-litert
+# onnx2tf builds a tf.keras model under the hood; on TF 2.17 we need the
+# Keras-2 shim active (TF_USE_LEGACY_KERAS=1, set automatically by
+# training/edge/yolo/export_quantize.py).
+tf_keras==2.17.0

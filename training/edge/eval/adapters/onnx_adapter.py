@@ -46,7 +46,7 @@ class OnnxAdapter:
     def predict(self, frame: np.ndarray) -> list[dict]:
         x = self._preprocess(frame)
         outputs = self.session.run(None, {self.input_name: x})
-        return _decode_yolo_onnx(outputs[0], self.confidence_threshold)
+        return _decode_yolo_onnx(outputs[0], self.confidence_threshold, self.imgsz)
 
     def num_params(self) -> int:
         try:
@@ -67,7 +67,16 @@ class OnnxAdapter:
         return 0
 
 
-def _decode_yolo_onnx(out: np.ndarray, conf_thr: float) -> list[dict]:
+def _decode_yolo_onnx(
+    out: np.ndarray, conf_thr: float, imgsz: int = 224
+) -> list[dict]:
+    """Decode an ultralytics YOLO ONNX/TFLite output to normalized boxes.
+
+    YOLOv8 raw output is xywh in INPUT pixel coordinates (0..imgsz), not
+    normalized. The eval harness's GT labels are normalized [0,1], so we
+    divide by imgsz before clipping. Without this scaling, all boxes get
+    clamped to a degenerate point and mAP collapses to 0.
+    """
     arr = np.asarray(out)
     if arr.ndim == 3 and arr.shape[1] >= 5 and arr.shape[1] < arr.shape[2]:
         arr = arr[0]
@@ -81,7 +90,7 @@ def _decode_yolo_onnx(out: np.ndarray, conf_thr: float) -> list[dict]:
     if arr.shape[0] < 5:
         return []
 
-    xywh = arr[:4, :]
+    xywh = arr[:4, :].astype(np.float32) / float(imgsz)
     cls_scores = arr[4:, :]
     conf = cls_scores.max(axis=0)
 

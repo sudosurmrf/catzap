@@ -72,7 +72,7 @@ class TfliteAdapter:
         deq = self._dequantize(raw, self.output_details[0])
         from .onnx_adapter import _decode_yolo_onnx
 
-        return _decode_yolo_onnx(deq, self.confidence_threshold)
+        return _decode_yolo_onnx(deq, self.confidence_threshold, self.imgsz)
 
     def num_params(self) -> int:
         try:
