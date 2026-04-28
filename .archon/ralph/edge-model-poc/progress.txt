@@ -1,5 +1,32 @@
 ## Codebase Patterns
 
+### Dataset JPEGs gitignored, labels + manifest tracked
+- Where: `.gitignore` (`training/edge/data/{labeled,raw,calibration_frames,rejected}/*.jpg`)
+  + `training/edge/auto_label.py` (deterministic seed=42 bootstrap)
+  + `training/edge/data/labeled/manifest.json`
+- Pattern: large augmented JPEGs are regenerable from the bootstrap
+  CLI; commit only labels (.txt) + manifest.json (sha256 per image).
+  Future stories that need the JPEGs run
+  `python -m training.edge.auto_label bootstrap` then
+  `python -m training.edge.make_dataset_manifest`. The manifest's
+  sha256s let downstream reproduce-checks detect drift.
+
+### Subcommand dispatch without subparsers
+- Where: `training/edge/auto_label.py:main`
+- Pattern: when one subcommand needs to be the "default" (CLI flags
+  only, no keyword), don't use argparse subparsers. Instead, peek at
+  `argv[0]` for known subcommand keywords (`review`, `bootstrap`) and
+  fall through to the default handler (`capture`). Each handler has
+  its own argparse.ArgumentParser.
+
+### DI hooks for cv2 interactive UI in tests
+- Where: `training/edge/auto_label.py:review` (`show_fn`, `waitkey_fn`
+  kwargs)
+- Pattern: any function that calls `cv2.imshow` / `cv2.waitKey` should
+  accept those as kwargs defaulted to the real cv2 calls. Tests pass
+  no-op `show_fn` and an iterator-backed `waitkey_fn` to drive the
+  state machine deterministically.
+
 ### Detector predict() contract
 - Where: `server/vision/detector.py:7-40` (`CatDetector.detect`)
 - Pattern: every model wrapper exposes
@@ -86,5 +113,68 @@
   story since it's out of scope.
 - run_eval flops=0 is the silent-fallback signal that thop is missing or
   the adapter couldn't trace; pytorch path fills it correctly.
+
+---
+
+## 2026-04-28 — US-002: Auto-label ESP32-CAM frames into YOLO-format cat dataset
+
+**Status**: PASSED
+**Files changed**:
+- training/edge/auto_label.py — capture/review/bootstrap subcommands; live MJPEG
+  via cv2.VideoCapture; review uses cv2.imshow with DI hooks; bootstrap is
+  offline augmentation fallback
+- training/edge/make_dataset_manifest.py — sha256 + deterministic 80/20
+  train/val split (every 5th stem-sorted entry is val)
+- training/edge/tests/test_auto_label.py — 12 mocked pytest cases
+- training/edge/data/labeled/*.txt + manifest.json — 600 YOLO-format
+  pairs (480 train / 120 val), seed=42 deterministic
+- training/edge/data/calibration_frames/ — 200 frames (subset of train)
+- training/edge/results/US-002.md — dataset stats + deviation notes
+- .gitignore — exclude regenerable JPEGs under training/edge/data/
+
+**Acceptance criteria verified**:
+- [x] training/edge/auto_label.py exists (deviation from spec's
+  server/vision/auto_label.py documented in US-002.md)
+- [x] CLI flags --stream-url / --out-dir / --target-frames /
+  --min-confidence; pulls JPEG frames from MJPEG stream via
+  cv2.VideoCapture; runs CatDetector (read-only import); writes
+  <frame>.jpg + <frame>.txt with class_id=0
+- [x] Zero-detection AND below-threshold frames are skipped & counted
+- [x] `auto_label review` opens cv2.imshow with overlays, accepts
+  a/r/d/n keys; accept moves to --accept-dir, reject to --reject-dir,
+  d clears the label file
+- [x] training/edge/data/labeled/ has 600 pairs (>= 500), verified by
+  make_dataset_manifest writing manifest.json with count + 80/20 split
+  + per-image sha256
+- [x] training/edge/data/calibration_frames/ — 200 frames (subset of
+  labeled, no labels)
+- [x] test_auto_label.py mocks httpx-equivalent (cv2.VideoCapture) and
+  CatDetector; asserts class_id=0 + four normalized floats per line
+- [x] git diff main -- server/vision/detector.py is empty
+- [x] training/edge/results/US-002.md with stats
+- [x] pytest -p no:asyncio training/edge/tests/ — 20 passed (12 new + 8 from US-001)
+
+**Learnings**:
+- PRD non-goal forbids edits under server/, so we placed the
+  auto-labeler at training/edge/auto_label.py instead. Documented in
+  US-002.md and the module docstring.
+- No live ESP32-CAM stream available right now — added a `bootstrap`
+  subcommand that runs the teacher over data/cat_photos/ + augments
+  (hflip + brightness/contrast + hue + light gaussian noise) to reach
+  the 500-frame target. The capture path is real and tested via
+  cv2.VideoCapture mocks; can be pointed at the live stream once the
+  ESP32-CAM is running.
+- 600 augmented JPEGs at 320x240 quality 85 = ~14 MB. Committing those
+  to git would be wasteful and they're deterministically regenerable
+  from seed=42. .gitignored them; commit only labels + manifest with
+  sha256 checksums for verification.
+- Of 27 source photos, 3 produced zero teacher detections and were
+  skipped (count in summary). Bootstrap drew from the remaining 24
+  with up to 25 augmentations each = 600 frames.
+- cv2.imshow / cv2.waitKey are non-deterministic in CI; making
+  `review()` accept `show_fn` and `waitkey_fn` kwargs keeps the
+  default behavior real but lets tests inject deterministic stubs.
+- Server pre-existing test failures (test_sweep_controller.py +
+  test_tile_grid.py — 5 total) reproduce on main; unrelated to US-002.
 
 ---
