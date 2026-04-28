@@ -1,32 +1,17 @@
-import { useEffect, useState, useRef, useCallback, useMemo } from "react";
+import { useEffect, useState, useCallback, useMemo } from "react";
 import LiveFeed from "./components/LiveFeed";
 import PanoramaView from "./components/PanoramaView";
-import EventLog from "./components/EventLog";
-import CatStats from "./components/CatStats";
-import Controls from "./components/Controls";
 import ZoneConfigPanel from "./components/ZoneConfigPanel";
-import Settings from "./components/Settings";
 import SweepControls from "./components/SweepControls";
-import AimCalibration from "./components/AimCalibration";
 import type { Zone, Detection, FrameData, ZoneTransform } from "./types";
 import { DEFAULT_TRANSFORM } from "./types";
 import { getZones, setVirtualAngle, updateZone } from "./api/client";
 
-type Panel = "events" | "stats" | "controls" | "settings";
 const EMPTY_DETECTIONS: Detection[] = [];
 
 const SWEEP_CONFIG = { panMin: 30, panMax: 150, tiltMin: 20, tiltMax: 70 };
 
-const NAV_ITEMS: { id: Panel; icon: string; label: string }[] = [
-  { id: "events", icon: "⚡", label: "Events" },
-  { id: "stats", icon: "◈", label: "Stats" },
-  { id: "controls", icon: "◎", label: "Controls" },
-  { id: "settings", icon: "⚙", label: "Settings" },
-];
-
 export default function App() {
-  const [panel, setPanel] = useState<Panel>("events");
-  const [aimCalibrationOpen, setAimCalibrationOpen] = useState(false);
   const [zones, setZones] = useState<Zone[]>([]);
   const [editingZones, setEditingZones] = useState(false);
   const [latestPanorama, setLatestPanorama] = useState<string | null>(null);
@@ -43,8 +28,6 @@ export default function App() {
   const [transform, setTransform] = useState<ZoneTransform>({ ...DEFAULT_TRANSFORM });
   // The original (untransformed) polygon — set when drawing completes or zone is selected
   const [originalPolygon, setOriginalPolygon] = useState<number[][] | null>(null);
-  // Remember which panel was open before editing
-  const prevPanelRef = useRef<Panel>("events");
 
   useEffect(() => {
     getZones().then(setZones).catch(console.error);
@@ -66,7 +49,6 @@ export default function App() {
   }, []);
 
   function startEditing() {
-    prevPanelRef.current = panel;
     setEditingZones(true);
     setPendingPolygon(null);
     setSelectedZoneId(null);
@@ -80,7 +62,6 @@ export default function App() {
     setSelectedZoneId(null);
     setTransform({ ...DEFAULT_TRANSFORM });
     setOriginalPolygon(null);
-    setPanel(prevPanelRef.current);
   }
 
   const handleZoneSaved = useCallback(() => {
@@ -140,7 +121,6 @@ export default function App() {
       overflow: "hidden",
       background: "var(--bg-deep)",
     }}>
-      <AimCalibration open={aimCalibrationOpen} onClose={() => setAimCalibrationOpen(false)} />
       {/* ── Left sidebar ────────────────────────── */}
       <aside style={{
         width: "var(--sidebar-width)",
@@ -168,20 +148,6 @@ export default function App() {
           }} />
         </div>
 
-        {/* Nav */}
-        {NAV_ITEMS.map((item) => (
-          <div key={item.id} className="tooltip-wrapper" data-tooltip={item.label}>
-            <button
-              className={`nav-btn ${!editingZones && panel === item.id ? "active" : ""}`}
-              onClick={() => { if (editingZones) return; setPanel(item.id); }}
-              style={editingZones ? { opacity: 0.3, cursor: "default" } : {}}
-            >
-              {item.icon}
-            </button>
-          </div>
-        ))}
-
-        <div className="divider" style={{ width: 28, margin: "6px auto" }} />
         <SweepControls />
 
         <div style={{ flex: 1 }} />
@@ -212,6 +178,7 @@ export default function App() {
         flexDirection: "column",
         gap: 1,
         overflow: "hidden",
+        position: "relative",
       }}>
         {/* Panorama strip — always visible, supports drawing in edit mode */}
         <div style={{
@@ -315,56 +282,36 @@ export default function App() {
             {zones.length} zone{zones.length !== 1 ? "s" : ""} active
           </span>
         </div>
-      </main>
 
-      {/* ── Right panel ─────────────────────────── */}
-      <aside style={{
-        width: "var(--panel-width)",
-        flexShrink: 0,
-        display: "flex",
-        flexDirection: "column",
-        borderLeft: "1px solid var(--border-subtle)",
-        background: "var(--bg-base)",
-        overflow: "hidden",
-      }}>
-        {/* Panel header */}
-        <div style={{
-          padding: "14px 16px 10px",
-          borderBottom: "1px solid var(--border-subtle)",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-        }}>
-          <span style={{
-            fontFamily: "var(--font-display)",
-            fontSize: 13,
-            fontWeight: 700,
-            color: editingZones ? "var(--amber)" : "var(--text-primary)",
-            letterSpacing: "0.04em",
-            textTransform: "uppercase",
+        {/* Floating zone editor — shown in edit mode */}
+        {editingZones && (
+          <div style={{
+            position: "absolute",
+            right: 12,
+            bottom: 48,
+            width: 300,
+            maxHeight: "60vh",
+            overflow: "auto",
+            zIndex: 50,
+            background: "var(--bg-base)",
+            border: "1px solid var(--border-base)",
+            borderRadius: "var(--radius-md)",
+            boxShadow: "var(--shadow-lg)",
+            padding: 12,
           }}>
-            {editingZones ? "Zones" : panel}
-          </span>
-          <span style={{
-            fontFamily: "var(--font-mono)",
-            fontSize: 10,
-            color: "var(--text-ghost)",
-          }}>
-            {editingZones ? "editing" : (
-              panel === "events" ? "live" :
-              panel === "stats" ? "analytics" :
-              panel === "controls" ? "manual" : "config"
-            )}
-          </span>
-        </div>
-
-        {/* Panel content */}
-        <div style={{
-          flex: 1,
-          overflow: "auto",
-          padding: 12,
-        }}>
-          {editingZones ? (
+            <div style={{
+              paddingBottom: 10,
+              marginBottom: 8,
+              borderBottom: "1px solid var(--border-subtle)",
+              fontFamily: "var(--font-display)",
+              fontSize: 12,
+              fontWeight: 700,
+              color: "var(--amber)",
+              letterSpacing: "0.04em",
+              textTransform: "uppercase",
+            }}>
+              Zones — editing
+            </div>
             <ZoneConfigPanel
               zones={zones}
               pendingPolygon={pendingPolygon}
@@ -375,16 +322,9 @@ export default function App() {
               onSelectZone={handleSelectZone}
               onZoneUpdated={refreshZones}
             />
-          ) : (
-            <>
-              {panel === "events" && <EventLog />}
-              {panel === "stats" && <CatStats />}
-              {panel === "controls" && <Controls servoPan={servoPan} servoTilt={servoTilt} />}
-              {panel === "settings" && <Settings onUpdate={refreshZones} onOpenAimCalibration={() => setAimCalibrationOpen(true)} />}
-            </>
-          )}
-        </div>
-      </aside>
+          </div>
+        )}
+      </main>
     </div>
   );
 }
