@@ -233,8 +233,8 @@
         "US-001"
       ],
       "priority": 10,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented in iteration N. Files: firmware/edge-bench/{main.cc, build.sh, Makefile.bench, run_bench.py, README.md, .gitignore, tools/unzip}, training/edge/tests/test_tflm_bench_parser.py, training/edge/results/{US-010.md, US-010-tflm.json}. TFLM pinned to 51bee03bed4776f1de88dd87226ff8c260f88e3c; binary built and self-tested on hello_world; both YOLOv8n_cat_int8 and NanoDet_cat_int8 load cleanly."
     },
     {
       "id": "US-011",

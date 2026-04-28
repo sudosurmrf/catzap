@@ -1,0 +1,33 @@
+# Builds firmware/edge-bench/build/edgebench against an already-built
+# tflite-micro tree. Driven by build.sh; not intended to be run standalone.
+#
+# Required vars:
+#   TFLM_DIR    — absolute path of the cloned tflite-micro tree
+#   BUILD_DIR   — output dir for the edgebench binary
+
+TFLM_DIR ?= $(error TFLM_DIR not set; run via build.sh)
+BUILD_DIR ?= $(error BUILD_DIR not set; run via build.sh)
+GEN_DIR ?= $(TFLM_DIR)/gen/linux_x86_64_default_gcc
+
+DOWNLOADS  := $(TFLM_DIR)/tensorflow/lite/micro/tools/make/downloads
+LIBPATH    := $(GEN_DIR)/lib/libtensorflow-microlite.a
+
+INCS := \
+  -I$(TFLM_DIR) \
+  -I$(DOWNLOADS)/flatbuffers/include \
+  -I$(DOWNLOADS)/gemmlowp \
+  -I$(DOWNLOADS)/kissfft \
+  -I$(DOWNLOADS)/ruy
+
+CXXFLAGS := -std=c++17 -O2 -DTF_LITE_STATIC_MEMORY $(INCS) -Wall -Wno-unused-function
+
+.PHONY: all
+all: $(BUILD_DIR)/edgebench
+
+$(BUILD_DIR)/edgebench: main.cc $(LIBPATH)
+	@mkdir -p $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) -o $@ main.cc $(LIBPATH) -lm -lpthread
+
+.PHONY: clean
+clean:
+	rm -f $(BUILD_DIR)/edgebench

@@ -1,5 +1,59 @@
 ## Codebase Patterns
 
+### TFLM x86 build: gen path is `linux_x86_64_default_gcc` on current main
+- Where: `firmware/edge-bench/build.sh` (gen-path sniff loop) +
+  `firmware/edge-bench/Makefile.bench` (`GEN_DIR ?= ...`)
+- Pattern: TFLM picks `gen/<TARGET>_<ARCH>_<BUILD>_<TOOLCHAIN>` and the
+  toolchain suffix appears in the output dir. Current `main` produces
+  `linux_x86_64_default_gcc/lib/libtensorflow-microlite.a`. Older revs use
+  `linux_x86_64_default/`. Sniff both. Hard-coding either path will break
+  on the other; the Makefile.bench accepts `GEN_DIR` as an override so
+  `build.sh` passes the discovered path through.
+
+### TFLM make uses /usr/bin/unzip; not present on WSL2 dev box
+- Where: `firmware/edge-bench/tools/unzip` + the early-PATH-prepend in
+  `firmware/edge-bench/build.sh`
+- Pattern: TFLM's `tensorflow/lite/micro/tools/make/download_and_extract.sh`
+  shells out to `unzip` to extract `.zip` deps. Many WSL2 / minimal
+  Debian/Ubuntu containers don't ship unzip. We carry a python shim that
+  handles `unzip <file> [-d <dir>]` (the only invocations TFLM uses) using
+  `zipfile.ZipFile`. `build.sh` prepends the shim dir to `PATH` only when
+  `command -v unzip` fails — so this is invisible on machines that have
+  the real `/usr/bin/unzip`.
+
+### TFLM dep downloads (gemmlowp, ruy, kissfft, flatbuffers) flake on 502
+- Where: documented in `firmware/edge-bench/README.md` ("TFLM compatibility
+  caveats" + the build sequence in `training/edge/results/US-010.md`)
+- Pattern: `download_and_extract.sh` retries via curl, but bursts of GitHub
+  archive 502s can still fail individual deps. If a download dir exists
+  but is empty, `make` still considers the rule satisfied — so on retry
+  the empty dir blocks redownload. Fix: `rmdir` the empty dirs before
+  re-running `build.sh`. `build.sh` does NOT auto-clean these because they
+  may be legitimately mid-download in a parallel `make -j` run.
+
+### TFLM MicroProfilerInterface for per-op aggregation
+- Where: `firmware/edge-bench/main.cc:TimingProfiler`
+- Pattern: `tflite::MicroProfilerInterface` exposes `BeginEvent(tag) ->
+  uint32_t` and `EndEvent(handle)` as the public extension point for
+  custom timing. Subclassing it (instead of using the bundled
+  `MicroProfiler`) is the right path when you need per-tag aggregation
+  across multiple Invoke() calls — the bundled class's events_ array is
+  private. Use `std::chrono::steady_clock::now()` for ns-precision timing.
+  Drop warmup events from aggregation by recording `events_.size()`
+  before the timed loop and starting the aggregation walk at that index.
+
+### edgebench stdout: machine-parsable framed key/value blocks
+- Where: `firmware/edge-bench/main.cc:main` (printf calls) +
+  `firmware/edge-bench/run_bench.py:parse_edgebench_stdout`
+- Pattern: print `=== EDGEBENCH START ===` / `=== EDGEBENCH END ===`
+  markers around all parser-visible output. Inside, use
+  `key: value` lines for scalars and a nested
+  `=== OP_BREAKDOWN START ===` / `=== OP_BREAKDOWN END ===` block for the
+  per-op rows. Anything outside the START/END markers (e.g. MicroPrintf
+  banners) is ignored. New fields are append-only — the parser ignores
+  unknown keys. This lets the C++ binary evolve independently of the
+  Python schema.
+
 ### Per-tensor INT8 output scale collapses NanoDet-Plus cls scores
 - Where: `training/edge/eval/adapters/nanodet_adapter.py:_post_quant_score_normalize`
   + `training/edge/results/US-009.md` ("`mAP_drop_quant` — explicit per PRD")
@@ -922,5 +976,97 @@ sequence (`setup_venv.sh && train_nanodet_cat.py && export_quantize.py
   reporting.
 - The `confidence_threshold=0.05` probe is a useful diagnostic for
   distinguishing "model is broken" from "model is saturated low".
+
+---
+
+## 2026-04-28 — US-010: TFLite Micro x86 host emulator/benchmark harness
+
+**Status**: PASSED
+**Files changed**:
+- `firmware/edge-bench/main.cc` (new) — C++ host binary; loads .tflite, runs
+  N inferences with TimingProfiler subclass of MicroProfilerInterface, prints
+  framed key/value report (`=== EDGEBENCH START/END ===`,
+  `=== OP_BREAKDOWN START/END ===`).
+- `firmware/edge-bench/build.sh` (new) — clones tflite-micro at pinned commit
+  `51bee03bed4776f1de88dd87226ff8c260f88e3c`, runs `make microlite TARGET=linux`,
+  links via `Makefile.bench`. PATH prepend for `tools/unzip` shim when host
+  lacks `/usr/bin/unzip`. Sniffs `gen/linux_x86_64_default_gcc` vs legacy
+  `linux_x86_64_default`.
+- `firmware/edge-bench/Makefile.bench` (new) — links edgebench against the
+  built microlite static library.
+- `firmware/edge-bench/run_bench.py` (new) — Python wrapper, CLI, parser
+  (`parse_edgebench_stdout`), `report_to_result` (applies x86→S3 multiplier),
+  `top_k_ops` helper for US-011 ingestion.
+- `firmware/edge-bench/README.md` (new) — TFLM commit pin, multiplier
+  rationale (3 citations), output schema, TFLM-compat caveats.
+- `firmware/edge-bench/.gitignore` (new) — exclude build/, third_party/,
+  models/.
+- `firmware/edge-bench/tools/unzip` (new) — python zipfile-based shim for
+  hosts without `/usr/bin/unzip`.
+- `training/edge/tests/test_tflm_bench_parser.py` (new) — 11 parser unit
+  tests; mocks `subprocess.run`; asserts JSON shape, percent rollup,
+  failed-alloc → tflm_compatible=false.
+- `training/edge/results/US-010.md` (new) — landed-files summary, multiplier
+  citations, self-test row, smoke runs on the two real candidates.
+- `training/edge/results/US-010-tflm.json` (new) — canonical self-test row
+  on hello_world.tflite.
+
+**Acceptance criteria verified**:
+- [x] `firmware/edge-bench/{README.md, build.sh, main.cc}` all present.
+- [x] `build.sh` clones TFLM at pinned commit, builds microlite, links
+      `firmware/edge-bench/build/edgebench`. SHA recorded in README.md.
+- [x] Binary prints `arena_used_bytes` (via `MicroInterpreter::arena_used_bytes()`),
+      per-op `count` + `total_us` (via custom MicroProfilerInterface subclass),
+      and `total_invoke_us_p50` / `_p95` over the timed window.
+- [x] `run_bench.py` CLI produces `training/edge/results/<story-id>-tflm.json`
+      with arena_bytes, op_breakdown (op_name, count, total_us, percent),
+      latency_us_p50/p95.
+- [x] `x86_to_s3_multiplier` field + `predicted_s3_us_*` + citation in
+      README.md "Multiplier rationale".
+- [x] Self-test on hello_world.tflite (TFLM example .tflite shipped under
+      `tensorflow/lite/micro/examples/hello_world/`): non-zero arena_used_bytes
+      (1216 B) and one op (FULLY_CONNECTED count=150 over 50 runs).
+- [x] `training/edge/tests/test_tflm_bench_parser.py` — 11 tests, all pass.
+- [x] `git diff main -- server/` is empty (0 lines).
+- [x] `pytest -p no:asyncio training/edge/tests/` — 102 passed (was 91 + 11
+      new), no regressions.
+
+**Real measured numbers (US-010 self-test on hello_world.tflite)**:
+  model_size = 3,164 B, arena_used = 1,216 B, op_breakdown = [FULLY_CONNECTED
+  count=150 total_us=15 percent=100.0], raw_x86_us p50=0 (below timer res)
+  p95=1, x86→S3 multiplier=8.0, predicted_s3_us_p95=8, schema_status=ok,
+  allocate_tensors_status=ok, tflm_commit pinned.
+
+**Smoke runs on real candidates (sanity, not US-011 yet)**:
+  yolov8n_cat_int8.tflite: arena=677 KB, top-3 ops by total_us =
+  CONV_2D / LOGISTIC / MUL — loads cleanly.
+  nanodet_cat_0.5x_224_int8.tflite (symlink): arena=2.20 MB, top-3 ops =
+  CONV_2D / DEPTHWISE_CONV_2D / LEAKY_RELU — loads cleanly. Both well
+  under the 8 MB arena ceiling (PSRAM proxy for the S3).
+
+**Learnings**:
+- TFLM upstream's gen path now suffixes the toolchain (`_gcc`); older PRDs
+  and TFLM docs reference `linux_x86_64_default` without the suffix. Both
+  must be sniffed. Codified in progress-patterns.
+- The build's `unzip` dep is a non-obvious pre-req on minimal hosts. We
+  ship a python shim under `firmware/edge-bench/tools/unzip` rather than
+  requiring the developer to `apt-get install unzip`. Drop-in shim handles
+  the exact subset of unzip flags TFLM's downloader uses.
+- TFLM's `download_and_extract.sh` doesn't gracefully recover from a
+  curl 502 partway through the build — it leaves an empty target dir
+  that make then considers complete on retry. We document the manual
+  cleanup (`rmdir downloads/{empty,...}`) in US-010.md and the codebase
+  patterns. Future stories that re-clone TFLM should pre-warm caches via
+  curl before running `build.sh`.
+- Both candidate INT8 models (yolov8n + nanodet) load cleanly in TFLM
+  with the registered ~80-builtin op resolver; no missing-op surprises
+  at this layer. The "TFLM-incompatible" failure mode the PRD warns about
+  in US-011 (custom NMS / Detect post-processing baked into the .tflite)
+  did NOT show up here — both models export their post-processing
+  outside the TFLite graph. US-011 will produce the load-bearing
+  side-by-side latency table.
+- `MicroProfilerInterface` is the right extension point for per-op
+  timing aggregation; the bundled `MicroProfiler` keeps its events_
+  array private so subclassing the interface is the only path.
 
 ---
