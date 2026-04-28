@@ -72,8 +72,8 @@
         "US-002"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented in iteration 3. Files: training/edge/yolo/{__init__,train_yolov8n_cat}.py + tests/test_yolo_train.py (6 cases) + data/labeled/{data.yaml,train.txt,val.txt,val/manifest.txt} + models/yolov8n_cat.pt (6.0 MB) + results/US-003{,.md,-yolov8n-stock-on-us002-val.json}. 50 epochs on RTX 4090 (~70 s); ultralytics-internal val mAP50=0.995, harness mAP50=0.909 on the same 120-image US-002 val. Stock yolov8n on the same val scored 0.636 — fine-tune lifted mAP by +0.273 absolute. server/ untouched, CatDetector import OK, pytest 26 passed."
     },
     {
       "id": "US-004",

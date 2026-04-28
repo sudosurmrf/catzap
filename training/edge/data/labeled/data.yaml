@@ -1,0 +1,6 @@
+path: /home/phetamine/.archon/workspaces/sudosurmrf/catzap/worktrees/archon/thread-d80faf36/training/edge/data/labeled
+train: /home/phetamine/.archon/workspaces/sudosurmrf/catzap/worktrees/archon/thread-d80faf36/training/edge/data/labeled/train.txt
+val: /home/phetamine/.archon/workspaces/sudosurmrf/catzap/worktrees/archon/thread-d80faf36/training/edge/data/labeled/val.txt
+nc: 1
+names:
+- cat

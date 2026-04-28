@@ -1,5 +1,35 @@
 ## Codebase Patterns
 
+### ultralytics dataset config + flat layout
+- Where: `training/edge/yolo/train_yolov8n_cat.py:prepare_data`
+- Pattern: ultralytics' `img2label_paths` only does the `/images/` ->
+  `/labels/` swap if the path contains `/images/`; otherwise it strips
+  the image extension and adds `.txt`. We exploit this — labels and
+  jpgs co-located in `training/edge/data/labeled/<stem>.{jpg,txt}` are
+  found automatically. data.yaml uses absolute `train.txt` / `val.txt`
+  files generated from the US-002 manifest. A second
+  `val/manifest.txt` (tab-separated `<image>\t<label>`) is also written
+  so the eval harness's `load_val_set()` can score the same val split.
+
+### `runs/` is regenerable, the .pt is the artifact
+- Where: `.gitignore` (`training/edge/yolo/runs/`,
+  `training/edge/data/*.cache`) +
+  `training/edge/yolo/train_yolov8n_cat.py:copy_to_canonical`
+- Pattern: ultralytics writes ~15 MB of plots/optimizer state per run
+  under `runs/<name>/`. Don't track that. Instead, copy `best.pt` to a
+  canonical `training/edge/models/<name>.pt` path that downstream
+  stories (PTQ, KD, TFLM bench) can rely on. The .cache files
+  ultralytics drops next to dataset dirs are also gitignored.
+
+### Smoke-test ultralytics training without actually training
+- Where: `training/edge/tests/test_yolo_train.py`
+- Pattern: `train()` in `train_yolov8n_cat.py` accepts a
+  `yolo_factory` kwarg (defaulting to `ultralytics.YOLO`) so tests can
+  swap in a `MagicMock`. Pre-create
+  `<runs_dir>/<name>/weights/best.pt` so the fallback path can resolve
+  it. This lets the smoke test assert `single_cls=True` + `imgsz=224`
+  in the train() kwargs without spawning ultralytics, in <1 s.
+
 ### Dataset JPEGs gitignored, labels + manifest tracked
 - Where: `.gitignore` (`training/edge/data/{labeled,raw,calibration_frames,rejected}/*.jpg`)
   + `training/edge/auto_label.py` (deterministic seed=42 bootstrap)
@@ -176,5 +206,68 @@
   default behavior real but lets tests inject deterministic stubs.
 - Server pre-existing test failures (test_sweep_controller.py +
   test_tile_grid.py — 5 total) reproduce on main; unrelated to US-002.
+
+---
+
+## 2026-04-28 — US-003: Fine-tune YOLOv8n single-class (cat-only) on auto-labeled set
+
+**Status**: PASSED
+**Files changed**:
+- training/edge/yolo/__init__.py — package marker
+- training/edge/yolo/train_yolov8n_cat.py — prepare_data + train + copy_to_canonical
+  (ultralytics.YOLO with single_cls=True / imgsz=224 / batch=32 / device=auto;
+  CLI via `python -m training.edge.yolo.train_yolov8n_cat`)
+- training/edge/data/labeled/data.yaml — nc=1, names=['cat'], absolute paths
+- training/edge/data/labeled/{train,val}.txt — 480 / 120 split derived from US-002 manifest
+- training/edge/data/labeled/val/manifest.txt — 120 image/label pairs for eval harness
+- training/edge/models/yolov8n_cat.pt — canonical best.pt (6.0 MB)
+- training/edge/results/US-003.json — fine-tuned eval (mAP=0.909, latency 5.91 ms p50)
+- training/edge/results/US-003-yolov8n-stock-on-us002-val.json — re-baseline stock yolov8n on the same val (mAP=0.636)
+- training/edge/results/US-003.md — comparison table + reproduce steps + honest val-set notes
+- training/edge/tests/test_yolo_train.py — 6 pytest cases (data prep + mocked train)
+- .gitignore — ignore training/edge/yolo/runs/ and training/edge/data/*.cache
+
+**Acceptance criteria verified**:
+- [x] training/edge/yolo/train_yolov8n_cat.py uses ultralytics.YOLO(yolov8n.pt).train(...)
+  with data=labeled/data.yaml, epochs=50 (configurable), imgsz=224, batch=32,
+  single_cls=True, device=auto
+- [x] training/edge/data/labeled/data.yaml: nc=1, names=['cat'], train/val
+  paths from US-002 manifest
+- [x] best.pt copied to training/edge/models/yolov8n_cat.pt
+- [x] python -m training.edge.eval.run_eval ... --story-id US-003
+  --val-dir training/edge/data/labeled/val/ produced training/edge/results/US-003.json
+- [x] training/edge/results/US-003.md with mAP/size/latency comparison
+  vs US-001-yolov8n-baseline-224 (and an apples-to-apples re-baseline)
+- [x] Smoke test mocks ultralytics.YOLO via yolo_factory kwarg, asserts
+  single_cls=True and imgsz=224
+- [x] git diff main -- server/ is empty
+- [x] CatDetector import smoke test still passes
+- [x] pytest -p no:asyncio training/edge/tests/ — 26 passed (12 + 8 + 6)
+
+**Learnings**:
+- ultralytics 8.2.0 + the flat `<stem>.{jpg,txt}` layout from US-002 just
+  works: `img2label_paths` falls back to "strip extension, add .txt" if
+  the image path doesn't contain `/images/`. No need to reorganize the
+  dataset into separate images/ / labels/ subdirs.
+- 50 epochs on 480 images @ 224×224 with batch=32 on a single RTX 4090
+  takes ~70 seconds. CPU-only would take ~30 minutes — the script's
+  `--device auto` defers to ultralytics' own picker so it's a single
+  flag change either way.
+- ultralytics' own validator reported mAP50=0.995, our harness reported
+  0.909 on the same val set. The gap is the harness's 0.25 confidence
+  threshold (mirrored from `server/vision/detector.py` for production
+  parity) plus VOC vs COCO-style mAP. Both methods rank fine-tune
+  >> stock by a wide margin, which is what US-003 actually has to show.
+- Stock yolov8n on the SAME val set scored 0.636 vs the fine-tune's
+  0.909 — a +0.273 absolute lift. The PRD-asked comparison vs
+  US-001-yolov8n-baseline-224 (silver GT, 22 imgs) is included for
+  completeness but is cross-val-set so cannot be cited as the headline.
+- single_cls=True trims params from 3,157,200 to 3,011,043 (~5 %) and
+  size from 6,534,387 B to 6,201,881 B; the multi-class head is gone.
+- `runs/` dir balloons by ~15 MB per training run (plots, optimizer
+  state, batch previews). Gitignored — only the canonical
+  `training/edge/models/yolov8n_cat.pt` is tracked.
+- ultralytics drops `.cache` files next to dataset dirs (here:
+  `training/edge/data/labeled.cache`). Also gitignored.
 
 ---
