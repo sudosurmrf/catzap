@@ -472,8 +472,8 @@
         "iter-G"
       ],
       "priority": 20,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented in iteration. Files: training/edge/results/aggregate_summary_v2.py (reads iter-A..iter-G rollups + v1 US-* JSONs; ROW_SPECS-style static row order; frontier picker excludes blocked/zero-mAP/tflm-incompatible; sort by predicted_p4_fps desc; pick_winner ranks by mAP-desc tie-break; deprecation list = strict mAP-domination). training/edge/results/SUMMARY_v2.md (regenerable; v1 SUMMARY.md preserved). training/edge/results/v2_frontier.json (machine-readable: frontier rows, winner, deprecated_v1, all_iter_rows, missing). training/edge/tests/test_summary_v2_aggregate.py (9 tests; covers all four AC clauses + iter-G inference_only_latency extraction + missing-input reporting + empty-frontier fallback). Real winner: iter-D (mAP=0.488 INT8w/INT16a) \u2014 dominates v1 US-006 INT8 (mAP=0.205) by +0.28 absolute. Deprecation list: US-004/US-005/US-006-int8/US-009 all mAP-dominated. pytest -p no:asyncio training/edge/tests/ \u2014 192/192 pass (was 183 + 9 new). server/ untouched (git diff main -- server/ is 0 lines). PR creation deferred per global guidance \u2014 draft PR via gh only."
     }
   ]
 }

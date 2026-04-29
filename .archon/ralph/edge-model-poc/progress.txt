@@ -2404,3 +2404,122 @@ mAP to hold first.)
   `test_in_graph_nms_ops_set_covers_known_exporter_outputs` is a
   regression bumper for that change.
 
+
+## 2026-04-28 — iter-H: Final synthesis SUMMARY_v2.md + ESP32-P4 rollout plan + deprecation list
+
+**Status**: PASSED
+**Files added**:
+- `training/edge/results/aggregate_summary_v2.py` — new; v2 ROW_SPECS-style
+  static row order (iter-A through iter-G with iter-B's 5-resolution sweep
+  expanded into 5 rows). Reads each iter-* primary JSON and the v1 US-*
+  EvalResults; emits SUMMARY_v2.md (sectioned: matrix, frontier members,
+  recommendation w/ MIPI-CSI + PSRAM + classifier handoff, deprecation,
+  missing inputs, regen instructions) + machine-readable v2_frontier.json
+  (frontier list, winner, deprecated_v1, all_iter_rows, missing).
+  Frontier picker exclusion rules: status != passed | tflm_compatible == False
+  | map50 == 0 (the cls-collapse signal). Sort: predicted_p4_fps desc, with
+  map50-desc + size-asc tie-breakers. pick_winner is intentionally a
+  separate sort (mAP-desc primary) — frontier is for *presentation*,
+  winner is for *deployment* and accuracy is the dominant criterion on
+  the catzap rare-positive rig.
+- `training/edge/results/SUMMARY_v2.md` — generated artifact. Re-run the
+  CLI to refresh.
+- `training/edge/results/v2_frontier.json` — generated machine-readable
+  shape for downstream tooling.
+- `training/edge/tests/test_summary_v2_aggregate.py` — 9 tests covering
+  all 4 PRD-required ACs plus iter-G's distinct extraction path (no
+  candidate_metrics; reads iter_a_baseline_metrics + inference_only_latency),
+  empty-frontier fallback, write_outputs both-files emission, and
+  missing-input reporting.
+
+**Acceptance criteria verified**:
+- [x] aggregate_summary_v2.py reads iter-*.json AND US-*.json, emits
+      SUMMARY_v2.md and v2_frontier.json — verified by running the CLI;
+      11 iter rows + 4 v1 rows ingested.
+- [x] SUMMARY_v2.md sections present: (1) v2 Pareto frontier table with
+      all 7 PRD-required columns (story, mAP, size_mb, arena_kb,
+      predicted_p4_latency_ms_p50, predicted_p4_fps, pareto_verdict),
+      (2) Recommendation paragraph picking ONE first-flash candidate
+      with concrete numbers, (3) ESP32-P4 rollout plan (PSRAM placement,
+      MIPI-CSI vs HTTP-stream, classifier handoff to
+      server/vision/classifier.py), (4) Deprecation list of v1 INT8
+      candidates the v2 frontier obsoletes — verified by
+      test_summary_v2_md_has_required_sections plus inspection.
+- [x] SUMMARY.md preserved (not overwritten) — verified by `git status
+      training/edge/results/SUMMARY.md` showing untracked-files for
+      SUMMARY_v2.md only and SUMMARY.md unmodified.
+- [x] test_summary_v2_aggregate.py covers all 4 AC clauses:
+      (a) test_frontier_picker_excludes_blocked_and_zero_mAP
+      (b) test_frontier_sorted_by_predicted_p4_fps_desc
+      (c) test_deprecation_list_includes_v1_INT8_candidates_dominated
+      (d) test_recommendation_addresses_mipi_csi_vs_http_stream
+- [x] PR creation deferred per global system guidance: do NOT push or
+      merge without the user's explicit ask. The plan is to push +
+      `gh pr create --draft` only after the user approves.
+- [x] git diff main -- server/ empty (0 lines).
+- [x] CatDetector import smoke test passes.
+- [x] pytest -p no:asyncio training/edge/tests/ — 192 passed, 0 failed
+      (was 183 + 9 new). server/tests/ has 5 pre-existing failures
+      (test_sweep_controller / test_tile_grid) which predate this work
+      and are NOT introduced by iter-H — re-confirmed by stashing the
+      diff and re-running.
+
+**Real winner (the iter-H decision matrix's pick)**:
+
+iter-D (INT8w/INT16a) — mAP@0.5 = 0.4885, predicted P4 latency p50
+~5481 ms (-5.8 % vs iter-A floor), predicted P4 fps ~0.182 (+6.2 % vs
+iter-A floor), TFLM arena 1.25 MB (in 32 MB P4 PSRAM, ~30.7 MB
+headroom). It also fits the 8 MB ESP32-S3 fallback ceiling, so the same
+.tflite is portable across both target boards. Dominates v1 US-006-int8
+(mAP 0.205) by +0.28 mAP — the v2 frontier deprecates ALL FOUR v1 INT8
+candidates (US-004/US-005/US-006-int8/US-009) on accuracy.
+
+**Frontier members (sorted by predicted_p4_fps desc)**:
+
+iter-D (mAP=0.488, fps=0.182) -> iter-G NMS off-graph (mAP=0.215,
+fps=0.173) -> iter-B@224 (mAP=0.215, fps=0.173) -> iter-A floor
+(mAP=0.215, fps=0.172) -> iter-B@256 (mAP=0.204, fps=0.131) ->
+iter-B@288 (mAP=0.198, fps=0.102) -> iter-B@320 (mAP=0.199, fps=0.083).
+
+**Excluded from frontier (and why, per iter-H exclusion rules)**:
+
+- iter-B@192: zero-mAP (cls collapse)
+- iter-C: zero-mAP (pruned student under per-tensor activation quant)
+- iter-E: zero-mAP (0.75x narrower student)
+- iter-F: zero-mAP (NanoDet per-channel — per-tensor activation quant
+  on the head's INT8 conv pathway is upstream of the float-output
+  dequant fix that recovered YOLOv8)
+
+**Learnings**:
+- The same exclusion rule (status==passed AND tflm_compatible AND
+  mAP@0.5 > 0) keeps the v2 frontier honest. Five of the eleven iter-*
+  candidates (4 + iter-D-blocked-fixture) collapsed to mAP=0 under
+  per-tensor activation quant — surfacing those in the matrix with
+  pareto_verdict=regress (and excluding them from the frontier list)
+  is more useful than silently dropping them. Future iterations
+  should keep this contract.
+- Frontier sort (fps desc) and winner pick (mAP desc) are two distinct
+  rankings. They diverge any time the highest-mAP row isn't the
+  fastest. Codifying them as separate functions with explicit docstrings
+  makes the SUMMARY's recommendation paragraph reproducible and
+  testable.
+- iter-G's JSON shape is intentionally different — same .tflite as
+  iter-A but a refreshed inference_only_latency. _extract_candidate
+  carries that as a third branch (alongside candidate_metrics and bare
+  EvalResult). When future iterations introduce new measurement-only
+  variants (e.g. fp16 fallback, profile-guided arena tuning), they
+  should follow this pattern: emit iter_a_baseline_metrics +
+  measurement_only_latency, not a synthetic candidate_metrics block.
+- The deprecation list test (test_deprecation_list_includes_v1_INT8_candidates_dominated)
+  enforces strict accuracy domination as the v1->v2 displacement rule.
+  Latency/size improvements alone don't trigger deprecation because
+  v1's frontier is implicitly the v2 floor (iter-A baseline). Codifying
+  this avoids accidentally deprecating a slower-but-more-accurate v1
+  candidate.
+- The recommendation paragraph weaves the four PRD-required clauses
+  (PSRAM, MIPI-CSI vs HTTP, classifier handoff, fps caveat) into one
+  narrative. A test that asserts each clause's keyword appears in the
+  output is a low-cost guardrail against future copy-edits silently
+  removing a section.
+
+---
