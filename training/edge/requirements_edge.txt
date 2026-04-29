@@ -1,5 +1,5 @@
 # Edge model reduction PoC — additional Python deps.
-# These are SEPARATE from server/requirements.txt; install in your edge
+# These are SEPARATE from server/requirements.txt;
 # venv with `pip install -r training/edge/requirements_edge.txt`.
 
 onnx==1.16.1
