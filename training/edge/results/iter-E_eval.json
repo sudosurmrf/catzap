@@ -1,0 +1,17 @@
+{
+  "story_id": "iter-E_eval",
+  "model_path": "training/edge/models/yolov8n_0p75x_cat_distilled_int8_pc.tflite",
+  "model_format": "tflite_int8",
+  "map50": 0.0,
+  "size_bytes": 1977944,
+  "params": 6448503,
+  "flops": 0,
+  "input_hw": [
+    224,
+    224
+  ],
+  "latency_ms_p50": 2.7484464953886345,
+  "latency_ms_p95": 3.4476920613087714,
+  "val_images": 120,
+  "notes": ""
+}

@@ -402,8 +402,8 @@
         "iter-B"
       ],
       "priority": 17,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented: training/edge/yolo/train_yolov8n_0p75x_cat.py (regenerate_config composes user-facing 0.75 with yolov8n's 0.25 base -> effective width_multiple=0.1875; partial_load_yolov8n_weights slices donor channels to fit; train_with_distill registers patch_student_loss_for_distill on on_train_start so the live student instance gets KD without a .pt round-trip; run_pipeline orchestrates config-prep -> distill -> per_channel_quant -> eval -> bench with per-stage failure isolation). Files: training/edge/yolo/configs/yolov8n_0p75x.yaml + training/edge/yolo/train_yolov8n_0p75x_cat.py + training/edge/tests/test_yolov8n_0p75x.py (8 mocked tests) + training/edge/results/{iter-E_yolov8n_0p75x.json, iter-E_eval.json, iter-E_bench-tflm.json, iter-E.md} + training/edge/models/yolov8n_0p75x_cat_distilled{.pt,_int8_pc.tflite}. Real numbers: 1.80M params (vs yolov8n 3.16M); fp32 mAP@0.5 (ultralytics validator) = 0.995; INT8 mAP@0.5 (eval harness) = 0.0 (same v1 cls-collapse pattern: narrower cls activations crushed by per-tensor scale dominated by xywh). Pareto verdict = regress: size 1.98 MB (-38.59%, past 20% bar), latency 3,805 ms p50 (-34.63%, past 15% bar), arena 683 KB (-1.39%), but mAP regressed so no promotion. iter-A remains accuracy floor; iter-D remains accuracy frontier; iter-E is the v2 efficiency frontier on raw numbers. Stacking iter-D's INT16-activation quant on iter-E's narrower student is the obvious follow-on. tflm_compatible=true, 16 ops, CONV_2D 90.58%. server/ untouched; CatDetector import OK; pytest -p no:asyncio training/edge/tests/ -> 170 passed (was 162 + 8 new from test_yolov8n_0p75x.py)."
     },
     {
       "id": "iter-F",
