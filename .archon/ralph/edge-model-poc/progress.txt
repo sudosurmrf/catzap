@@ -1,5 +1,40 @@
 ## Codebase Patterns
 
+### iter-A's float-output dequant works on YOLOv8 but NOT NanoDet — predict before applying
+- Where: `training/edge/results/iter-F.md` ("Why YOLOv8 recovered and NanoDet did not")
+  + `training/edge/nanodet/per_channel_quant.py` (thin wrapper that proves the recipe is reusable)
+  + `training/edge/results/iter-F_nanodet_per_channel.json:pareto_vs_nanodet`
+- Pattern: the `inference_output_type=tf.float32` fix that recovered
+  YOLOv8 cls collapse (iter-A: mAP 0->0.215) recovers cls precision in
+  the head's LAST-int8 tensor by deferring dequant to fp32. It does
+  NOT recover precision lost UPSTREAM in the head's INT8 conv layers.
+  YOLOv8 KD-distilled weights carry calibrated cls magnitudes such that
+  the last-int8 tensor preserves enough cls signal; NanoDet-Plus ships
+  pretrained on COCO (no cat KD) and emits cls already-sigmoided
+  alongside unbounded reg-DFL logits, so a per-tensor activation scale
+  on the head's conv outputs is dominated by reg-DFL and quantizes cls
+  AND reg-DFL into near-zero buckets BEFORE the dequant. Diagnostic:
+  every prior anchor predicts the same constant bbox post-quant. When a
+  new architecture lands, predict whether iter-A's recipe will recover
+  PTQ collapse by asking: "does the head's last-int8 tensor carry enough
+  cls signal to be worth dequantizing?". If no, you need head-split ONNX
+  surgery (split cls + reg into separate output tensors so each gets
+  its own activation scale) or fp16 fallback. Don't burn a full iter-*
+  slot on float-output dequant alone for such architectures.
+
+### Dual-baseline Pareto aggregator pattern (same-arch + cross-arch)
+- Where: `training/edge/results/aggregate_iter_f.py:aggregate` (introduces
+  `pareto_vs_nanodet` + `pareto_vs_yolo_v2_frontier` keys)
+  + `_verdict_against` helper for scoring against an arbitrary baseline JSON
+- Pattern: `aggregate_iter_a.py` had ONE baseline; iter-F introduced TWO
+  because the candidate is being scored against (a) its own architectural
+  predecessor (US-009 NanoDet) AND (b) the cross-architecture frontier
+  (iter-A YOLOv8). Both verdicts in one JSON: `pareto_vs_<X>` keys, same
+  schema as the existing `pareto` key but explicitly labeled. This lets
+  iter-H's SUMMARY_v2 ingest cross-architecture comparisons without re-
+  running aggregators. Any future iter-* candidate that's worth comparing
+  against multiple frontiers should follow this shape.
+
 ### iter-E finding: narrowing student width WITHOUT INT16 activations re-triggers cls collapse
 - Where: `training/edge/results/iter-E.md` ("Why mAP collapsed at PTQ")
   + `training/edge/results/iter-E_yolov8n_0p75x.json:pareto.deltas`
@@ -2109,6 +2144,105 @@ mAP to hold first.)
   reusing it without modification means any future improvement to the
   quantizer (e.g. a Detect-head splitter inserted into onnx2tf's
   rewrite hooks) automatically benefits iter-A through iter-E.
+
+---
+
+
+## 2026-04-28 — iter-F: NanoDet revisit with per-channel quant
+
+**Status**: PASSED (Pareto: vs US-009 = `equal`, vs iter-A = `regress`)
+**Files added**:
+- `training/edge/nanodet/per_channel_quant.py` — thin wrapper reusing iter-A's
+  `quantize_to_int8_float_output_tflite` from
+  `training.edge.yolo.per_channel_quant`. Re-exports `calibration_loader` from
+  `training.edge.yolo.export_quantize` (load-bearing identity per the
+  `is`-identity contract). CLI matches iter-A shape; `--onnx` flag short-
+  circuits the .pth->ONNX step so the pipeline runs in the main env.
+- `training/edge/tests/test_nanodet_per_channel.py` — 5 mocked DI tests
+  including the load-bearing `nanodet.calibration_loader is yolo.calibration_loader`
+  assertion and the iter-F delta (`inference_output_type=tf.float32`).
+- `training/edge/results/aggregate_iter_f.py` — dual-baseline aggregator
+  emitting Pareto verdicts vs BOTH US-009 (same-architecture) and iter-A
+  (cross-architecture). New convenience-layout shape: a single
+  iter-F_nanodet_per_channel.json with `pareto_vs_nanodet` +
+  `pareto_vs_yolo_v2_frontier` keys.
+- `training/edge/results/iter-F{,_nanodet_per_channel,-tflm}.{json,md}`.
+- `training/edge/nanodet/checkpoints/nanodet-plus-m_416.onnx` (gitignored,
+  regenerable from the upstream URL with sha256 in `checkpoints/SHA256SUMS`).
+- `training/edge/models/nanodet_cat_0.5x_224_int8_pc.tflite` (gitignored,
+  1.61 MB INT8 with float32 output dtype).
+
+**Acceptance criteria verified**:
+- [x] `training/edge/nanodet/per_channel_quant.py` thin wrapper that flips
+      `inference_output_type=tf.float32` (verified by
+      test_quantizer_uses_float32_output_dtype_via_iter_a_path) and re-uses
+      the same `calibration_loader` identity (verified by
+      test_calibration_loader_is_shared_with_yolo_export_quantize).
+- [x] CLI matches the spec: `--onnx`, `--calib-dir`, `--out`, `--imgsz`.
+- [x] iter-F_nanodet_per_channel.json emitted with Pareto verdict vs US-009
+      AND vs iter-A (v2 YOLOv8n frontier). Both verdicts present in the JSON.
+- [x] iter-F.md with comparison + the 0.5x deviation acknowledgement
+      (model is upstream 1.0x at 416 because no 0.5x .pth was upstream-
+      published; same v1 US-007/US-008 deviation chain).
+- [x] 5 tests (>= the required 2). 175/175 edge tests pass.
+- [x] `git diff main -- server/` empty.
+- [x] CatDetector import smoke test passes.
+
+**Real measured numbers**:
+- mAP@0.5 = 0.000 (vs US-009's 0.000; vs iter-A's 0.215)
+- size = 1,613,232 B (-49.9% vs iter-A; +0.01% vs US-009)
+- arena_used = 2,253,888 B (+225.3% vs iter-A; +0.00% vs US-009)
+- raw x86 p50 = 1,788,134 us (-2.5% vs US-009; +53.6% vs iter-A)
+- predicted P4 p50 (mult=5.0) = 8,940.67 ms (0.112 fps)
+- output dtype: float32 (the iter-F delta) vs US-009's int8
+
+**Learnings**:
+
+- The float-output dequant fix that recovered YOLOv8's cls collapse (iter-A:
+  mAP 0->0.215) is **insufficient** for NanoDet-Plus. Diagnostic at
+  conf=0.05 reveals every prior anchor predicts the SAME bbox
+  `[0.015, 0.000, 1.000, 0.996]` — meaning the reg-DFL distance bins
+  collapsed under per-tensor activation quant on the head's INT8 conv
+  pathway, UPSTREAM of the float-output dequant. The float dequant only
+  preserves precision in the head's last tensor, not through the conv
+  layers feeding it.
+
+- This is the inverse of the iter-A finding: YOLOv8 KD-distilled
+  weights had calibrated cls magnitudes such that the head's last-int8
+  tensor preserved enough cls signal for the dequant to recover. NanoDet
+  ships pretrained on COCO (no cat-only KD shaping) AND its head emits
+  cls already-sigmoided alongside unbounded reg-DFL logits, so a per-
+  tensor activation scale on the head's conv outputs gets dominated by
+  reg-DFL and quantizes cls into a near-zero bucket BEFORE we get to
+  dequantize.
+
+- Codebase pattern: when a new architecture lands in this PoC, predict
+  whether the iter-A trick (`inference_output_type=tf.float32`) will
+  recover PTQ collapse by asking: does the head's LAST-int8 tensor
+  carry enough cls signal to be worth dequantizing? If the answer is
+  "no, the cls is already crushed by upstream activation quant", you
+  need head-split ONNX surgery or fp16 fallback. Don't burn a
+  full iter-* slot on float-output dequant alone for such architectures.
+
+- iter-F costs zero promotion ROI (verdict=`equal` vs same-arch
+  baseline; `regress` vs cross-arch frontier) but produces THREE useful
+  artifacts: (1) the file `training/edge/nanodet/per_channel_quant.py`
+  is a complete reusable wrapper that any future NanoDet variant
+  (genuine 0.5x cat .pth via US-008's venv, or fp16 fallback experiment)
+  can re-target with a single CLI flag change; (2) the
+  `aggregate_iter_f.py` dual-baseline pattern is reusable for any
+  future cross-architecture iter-* candidate; (3) the dual-baseline
+  JSON shape (`pareto_vs_*` keys) is now a documented seam iter-H's
+  SUMMARY_v2 will ingest.
+
+- ONNX is fixed at 416×416 (not dynamic). Calibration must use
+  `--imgsz 416` not 224. Documented in iter-F.md.
+
+- Codebase pattern (re-affirmed): the `calibration_loader is`-identity
+  contract from US-009 + iter-A continues to hold across the
+  YOLO/NanoDet PTQ paths. The test
+  `test_calibration_loader_is_shared_with_yolo_export_quantize` enforces
+  it for iter-F too.
 
 ---
 

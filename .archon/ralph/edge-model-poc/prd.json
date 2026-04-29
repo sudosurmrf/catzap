@@ -424,8 +424,8 @@
         "US-009"
       ],
       "priority": 18,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented in iteration 13 (v2 follow-on). Files: training/edge/nanodet/per_channel_quant.py (thin wrapper reusing iter-A quantize_to_int8_float_output_tflite), training/edge/tests/test_nanodet_per_channel.py (5 tests incl. is-identity check on calibration_loader and float32 output dtype), training/edge/results/aggregate_iter_f.py (dual-baseline Pareto: vs US-009 + vs iter-A), training/edge/results/iter-F{,_nanodet_per_channel,-tflm}.{json,md}. Artifact: training/edge/models/nanodet_cat_0.5x_224_int8_pc.tflite (1.61 MB, gitignored). Result: float-output dequant fix that recovered YOLOv8 cls (iter-A: mAP=0->0.215) does NOT recover NanoDet (mAP=0.000 vs US-009 baseline 0.000). Pareto verdicts: vs US-009=equal (latency -2.5%, mAP held at zero), vs iter-A=regress (cross-arch: -0.2155 mAP, +225% arena, +54% latency). Diagnostic at conf=0.05 confirms head outputs constant bbox across all 120 val frames -> reg-DFL distance bins ALSO collapsed under per-tensor activation quant upstream of the float output. Honest finding: NanoDet PTQ failure mode is structurally deeper than YOLOv8's and requires either head-split ONNX surgery or fp16 fallback. Deviation: imgsz=416 (only 1.0x .pth published; v1 US-007/US-008). 175/175 edge tests pass; server/ untouched."
     },
     {
       "id": "iter-G",
