@@ -1,5 +1,74 @@
 ## Codebase Patterns
 
+### iter-* JSON shape: {eval, tflm, pareto, candidate_metrics, baseline_metrics}
+- Where: `training/edge/results/aggregate_iter_a.py` +
+  `training/edge/yolo/per_channel_quant.build_pareto_verdict`
+- Pattern: every v2 follow-on iteration (iter-A..iter-G) emits ONE
+  rollup JSON at `training/edge/results/iter-<X>_<slug>.json` whose
+  schema is: `{story_id, title, status:"passed"|"blocked",
+  blocked_reason, model_path, p4_multiplier, p4_multiplier_source,
+  eval:<EvalResult>, tflm:<run_bench shape>, pareto:<verdict-dict>,
+  candidate_metrics:{map50,size_bytes,arena_used_bytes,
+  predicted_p4_latency_ms_p50,predicted_p4_fps},
+  baseline_metrics:{...}}`. The iter-H synthesis script
+  (aggregate_summary_v2) ingests these uniformly. Always include all
+  fields even on `status="blocked"` so the iter-H matrix can render the
+  attempt — never silently drop a blocked iteration.
+
+### build_pareto_verdict: hard-coded thresholds, named-baseline arg
+- Where: `training/edge/yolo/per_channel_quant.build_pareto_verdict` +
+  module-top constants (`MAP_REGRESS_TOLERANCE`, `LATENCY_IMPROVE_PCT=15.0`,
+  `SIZE_IMPROVE_PCT=20.0`, `ARENA_IMPROVE_PCT=15.0`)
+- Pattern: Pareto verdict thresholds come from the user message's v2
+  follow-on rules — they are NOT runtime knobs. Tests assert the exact
+  threshold values so a future iteration can't silently relax them.
+  Verdicts: `dominates` (mAP held + 1+ axis past threshold), `equal`
+  (mAP held + no axis past threshold), `regress` (mAP dropped),
+  `blocked` (caller passes `blocked_reason`). Caller MUST pass a named
+  baseline_story (e.g. "US-006-int8") so the verdict is auditable.
+
+### ESP32-P4 latency multiplier: 5.0 (vs S3's 8.0)
+- Where: `training/edge/yolo/per_channel_quant.DEFAULT_P4_MULTIPLIER` +
+  `_P4_MULTIPLIER_SOURCE` (string)
+- Pattern: P4 has 400 MHz dual-core RV32 with PIE/vector ext (vs S3's
+  240 MHz single-core for ML). Without ESP-DL acceleration the scalar
+  reference path is ~5-6x slower than x86; with vector ext ~3x. We use
+  5.0 as the conservative midpoint. Every iter-A..iter-G aggregator
+  records its multiplier choice in the JSON's `p4_multiplier` +
+  `p4_multiplier_source` fields so iter-H can re-do the math with a
+  different multiplier once real boards arrive.
+
+### YOLOv8 PTQ cls-collapse fix #2: float32 OUTPUT dequant
+- Where: `training/edge/yolo/per_channel_quant.quantize_to_int8_float_output_tflite`
+  + iter-A.md "Why this works"
+- Pattern: the cls-collapse documented in v1 progress.txt
+  ("YOLOv8 PTQ + per-tensor output quant collapses cls head") has TWO
+  orthogonal fixes — (1) US-006 KD which shapes student-side
+  activations the calibrator sees, and (2) iter-A's
+  `inference_output_type=tf.float32` which appends a DEQUANTIZE op so
+  the head reads out at full float resolution. Combined they recover
+  0.0 mAP -> 0.215 mAP under PTQ. The architecturally pure fix
+  (split Detect head into separate cls/xywh tensors via ONNX surgery)
+  is still on the table for a later iteration; for v2 the float-output
+  cost (4x larger output_bytes: 5,145 -> 20,580; ~5 µs per dequant on
+  TFLM x86) is negligible vs the ~1.16 s total invoke time.
+
+### Bootstrap UUIDs are NOT seeded — val/manifest.txt regen pattern
+- Where: `training/edge/auto_label.py:bootstrap` (uuid4().hex calls) +
+  `training/edge/data/regenerate_val_manifest.py` (post-bootstrap repair)
+- Pattern: v1's progress.txt called the bootstrap "deterministic seed=42"
+  but seed=42 only covers IMAGE CONTENT (augmentations / brightness /
+  flip). Filenames go through uuid4() which is unseeded — every fresh
+  worktree's bootstrap produces a DIFFERENT 600-frame UUID set. v1's
+  tracked .txt labels are orphaned because their .jpg counterparts are
+  gitignored and unrecoverable. Workaround: run
+  `python training/edge/data/regenerate_val_manifest.py` AFTER bootstrap
+  + make_dataset_manifest. This rewrites val/manifest.txt to point at
+  the freshly-paired files. iter-A through iter-G ALL need this step
+  in their reproduce sections. A future iteration could swap uuid4()
+  for a seed-derived deterministic ID; out of scope here because doing
+  so would orphan v1's already-tracked labels too.
+
 ### Decision-matrix aggregator: ROW_SPECS + dual-source ingestion
 - Where: `training/edge/results/aggregate_summary.py:ROW_SPECS` +
   `_build_row` + `format_decision_matrix` + `format_recommendation`
@@ -1262,5 +1331,95 @@ sequence (`setup_venv.sh && train_nanodet_cat.py && export_quantize.py
   `test_recommendation_handles_no_int8_winner` — it doesn't run on the
   current real data but it's the safety net for future iterations
   where the export pipeline regresses across all candidates.
+
+---
+
+## 2026-04-28 — iter-A: Per-channel output quantization fix on yolov8n_cat_distilled
+
+**Status**: PASSED (Pareto verdict: equal)
+**Files changed**:
+- training/edge/yolo/per_channel_quant.py — new module: export_per_channel_int8 +
+  quantize_to_int8_float_output_tflite (the iter-A delta vs US-004's pipeline:
+  inference_output_type=tf.float32) + build_pareto_verdict + DEFAULT_P4_MULTIPLIER
+- training/edge/tests/test_per_channel_quant.py — 9 mocked pytest cases:
+  (1) int8-input/float32-output converter config, (2) calibration_loader
+  is-identity vs export_quantize, (3) representative_dataset >= 100 frames,
+  (4) full-DI-chain orchestrator, (5-8) pareto verdict branches
+  (dominates/equal/regress/blocked), (9) representative_dataset callable
+  reaches the converter through the DI chain
+- training/edge/data/regenerate_val_manifest.py — post-bootstrap helper that
+  rebuilds val/manifest.txt + train.txt + val.txt from manifest.json's split
+- training/edge/results/iter-A.json — eval (mAP=0.2155, p50=13.31 ms host CPU)
+- training/edge/results/iter-A-tflm.json — TFLM bench (arena=692,912 B,
+  raw_p50=1,164,102 us, predicted_s3_p50=9,313 ms / fps=0.107)
+- training/edge/results/iter-A_per_channel_quant.json — final aggregate with
+  Pareto verdict='equal' (mAP +0.0108, size +0.005%, arena +0.014%, latency -1.07%)
+- training/edge/results/iter-A.md — rollup report + reproduce section
+- training/edge/results/aggregate_iter_a.py — eval+TFLM+verdict aggregator
+- .archon/ralph/edge-model-poc/prd.json — 8 new userStories (iter-A..iter-H)
+  added to define the v2 follow-on loop scope; iter-A.passes=true with notes
+
+**Acceptance criteria verified**:
+- [x] training/edge/yolo/per_channel_quant.py with export_per_channel_int8 and
+      DI hooks for onnx_exporter / savedmodel_converter / quantizer
+- [x] CLI: `python -m training.edge.yolo.per_channel_quant ...` produced
+      training/edge/models/yolov8n_cat_distilled_int8_pc.tflite (3.07 MB)
+- [x] python -m training.edge.eval.run_eval ... --story-id iter-A produced
+      training/edge/results/iter-A.json with mAP=0.2155
+- [x] python firmware/edge-bench/run_bench.py ... --story-id iter-A produced
+      training/edge/results/iter-A-tflm.json with arena_used=677 KB
+- [x] training/edge/results/iter-A_per_channel_quant.json with eval + tflm +
+      pareto:{verdict, baseline_story, deltas:{map50,size_pct,arena_pct,
+      latency_pct}, p4_multiplier, p4_multiplier_source}
+- [x] training/edge/results/iter-A.md: Pareto verdict + before/after table +
+      cls-collapse explanation citing v1 progress.txt patterns
+- [x] training/edge/tests/test_per_channel_quant.py — 9 cases including the
+      mandatory float32-output assertion + calibration_loader is-identity +
+      representative_dataset >=100 + build_pareto_verdict branches
+- [x] git diff main -- server/ is empty (0 lines)
+- [x] CatDetector import smoke test passes
+- [x] pytest -p no:asyncio training/edge/tests/ — 133 passed (124 v1 + 9 new)
+
+**Real measured numbers**:
+  iter-A vs v1 US-006-int8 baseline (KD distilled INT8):
+    mAP@0.5         0.2155 vs 0.2047  (+0.0108 absolute / +5.3% relative)
+    size_bytes      3,221,000 vs 3,220,840  (+160 / +0.005%)
+    arena_used      692,912 vs 692,816  (+96 / +0.014%)
+    raw x86 p50     1,164,102 us vs 1,176,673 us  (-12,571 / -1.07%)
+    predicted P4 p50  5,820.51 ms vs 5,883.36 ms  (-62.85 / -1.07%, mult=5.0)
+    output_bytes    20,580 (float32) vs 5,145 (int8)  (4x larger; expected)
+    tflm_compatible true vs true
+  Pareto verdict: equal — mAP holds, no efficiency axis crosses thresholds
+  (latency >=15% / size >=20% / arena >=15%), so iter-A is NOT promoted to
+  new frontier under strict v2 rules. But iter-A is the accuracy floor for
+  iter-B/C/E going forward.
+
+**Learnings**:
+- v1's `inference_output_type=tf.int8` was the load-bearing wrong knob — flip
+  to tf.float32 and the cls collapse partially un-collapses (KD already
+  partially un-collapsed the student cls activations; the float dequant
+  preserves whatever survived). Net mAP gain +0.0108 absolute.
+- Same effective cost: arena +96 bytes (a tiny dequant scratch buffer), size
+  +160 bytes (one DEQUANTIZE op + its scale/zero). Latency essentially
+  unchanged (the dequant on (1,5,1029) is ~5 µs out of ~1.16 s total).
+- The 4x output_bytes growth (5,145 -> 20,580) doesn't matter on TFLM/P4 —
+  both fit easily in PSRAM and the dequant is bandwidth-bound on a 32-bit
+  bus, dominated by inference itself.
+- v2's 15%/20%/15% thresholds are tight enough that pure converter knobs
+  (no architectural changes) likely won't promote — iter-B (resolution
+  sweep) and iter-C (channel pruning) are where the size/arena/latency axes
+  should move. iter-A's role is to lift the accuracy floor so iter-B/C
+  candidates can spend their accuracy budget on efficiency.
+- auto_label.bootstrap's uuid4() filenames are NOT seed-deterministic
+  (despite progress.txt's v1 claim). Codified in a new pattern at the top
+  of progress.txt + a small regenerate_val_manifest.py helper. Future
+  iterations need both `auto_label bootstrap` AND `regenerate_val_manifest.py`
+  to repair the val/manifest.txt before eval.
+- Build edgebench had to chmod +x firmware/edge-bench/tools/unzip on this
+  fresh worktree (file came in 644 from git). Filed under "TFLM x86 build
+  caveats". Probably worth a chmod in build.sh itself, but out of scope.
+- The eval harness's tflite_adapter handles float32 output natively
+  through `_dequantize` (no-op when arr is already float). No adapter
+  changes needed for iter-A.
 
 ---
