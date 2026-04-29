@@ -1,0 +1,34 @@
+{
+  "story_id": "US-010",
+  "model_path": "firmware/edge-bench/models/hello_world.tflite",
+  "model_size_bytes": 3164,
+  "runs": 50,
+  "arena_size_bytes": 8388608,
+  "arena_used_bytes": 1216,
+  "input_bytes": 4,
+  "output_bytes": 4,
+  "schema_status": "ok",
+  "allocate_tensors_status": "ok",
+  "timed_invoke_status": "ok",
+  "profiler_overflowed": false,
+  "tflm_compatible": true,
+  "op_breakdown": [
+    {
+      "op_name": "FULLY_CONNECTED",
+      "count": 150,
+      "total_us": 15,
+      "percent": 100.0
+    }
+  ],
+  "raw_x86_us_p50": 0.0,
+  "raw_x86_us_p95": 1.0,
+  "raw_x86_us_min": 0.0,
+  "raw_x86_us_max": 2.0,
+  "raw_x86_us_mean": 0.0,
+  "x86_to_s3_multiplier": 8.0,
+  "predicted_s3_us_p50": 0.0,
+  "predicted_s3_us_p95": 8.0,
+  "predicted_s3_fps": 0.0,
+  "binary": "/home/phetamine/.archon/workspaces/sudosurmrf/catzap/worktrees/archon/thread-d80faf36/firmware/edge-bench/build/edgebench",
+  "tflm_commit": "51bee03bed4776f1de88dd87226ff8c260f88e3c"
+}

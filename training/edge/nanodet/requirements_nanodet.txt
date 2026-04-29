@@ -1,0 +1,31 @@
+# NanoDet-Plus isolated-venv requirements (US-007 / US-008 / US-009)
+#
+# Install with: training/edge/nanodet/setup_venv.sh
+# Why a separate venv: nanodet upstream pins torch<2.0 and
+# pytorch-lightning<2.0, both incompatible with the catzap main env's
+# torch 2.3.0 + ultralytics 8.2.0 stack. See README.md.
+#
+# Upstream commit pin (informational; the venv setup script clones at this SHA):
+#   https://github.com/RangiLyu/nanodet
+#   commit: main @ 9d1d83a (2024-04-12) — last known-good before any
+#           breaking refactor; see SHA recorded by setup_venv.sh.
+
+# Upstream-listed deps (mirrors RangiLyu/nanodet/requirements.txt verbatim):
+Cython
+imagesize
+matplotlib
+numpy
+omegaconf>=2.0.1
+onnx
+onnx-simplifier
+opencv-python
+pyaml
+pycocotools
+pytorch-lightning>=1.9.0,<2.0.0
+tabulate
+tensorboard
+termcolor
+torch>=1.10,<2.0
+torchmetrics
+torchvision
+tqdm

@@ -1,0 +1,17 @@
+{
+  "story_id": "US-005",
+  "model_path": "training/edge/models/yolov8n_cat_qat_int8.tflite",
+  "model_format": "tflite_int8",
+  "map50": 0.0,
+  "size_bytes": 3220840,
+  "params": 7881671,
+  "flops": 0,
+  "input_hw": [
+    224,
+    224
+  ],
+  "latency_ms_p50": 3.8120899989735335,
+  "latency_ms_p95": 4.452536121243611,
+  "val_images": 120,
+  "notes": "QAT: 1 epoch @ lr=0.0001, fake_quant_inserted=True"
+}

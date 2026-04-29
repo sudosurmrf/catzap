@@ -1,0 +1,17 @@
+{
+  "story_id": "US-008",
+  "model_path": "training/edge/nanodet/checkpoints/nanodet_cat_0.5x_224.pth",
+  "model_format": "pytorch",
+  "map50": 0.0,
+  "size_bytes": 0,
+  "params": 0,
+  "flops": 0,
+  "input_hw": [
+    224,
+    224
+  ],
+  "latency_ms_p50": 0.0,
+  "latency_ms_p95": 0.0,
+  "val_images": 120,
+  "notes": "DEVIATION: see training/edge/results/US-008.md. Real fine-tune is gated on the isolated nanodet venv (training/edge/nanodet/setup_venv.sh) because upstream pins torch<2.0 and pytorch-lightning<2.0; the catzap main env ships torch 2.3.0 + lightning 2.x. Wiring delivered this iteration: training/edge/nanodet/configs/nanodet_plus_m_0.5x_cat.yml (num_classes=1, input_size=[224,224], lr=1e-4, epochs=50), training/edge/nanodet/yolo_to_coco.py (US-002 YOLO -> COCO converter, validated against the 600-frame manifest), training/edge/nanodet/train_nanodet_cat.py (wraps upstream TrainingTask with config-overrides; trainer_factory DI for tests). Eval row stays at zeros until setup_venv.sh runs and the canonical .pth is produced; US-008.md tracks the gap and the reproduce command."
+}

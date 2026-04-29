@@ -1,0 +1,17 @@
+{
+  "story_id": "US-006-int8",
+  "model_path": "training/edge/models/yolov8n_cat_distilled_int8.tflite",
+  "model_format": "tflite_int8",
+  "map50": 0.20470688237296086,
+  "size_bytes": 3220840,
+  "params": 7881671,
+  "flops": 0,
+  "input_hw": [
+    224,
+    224
+  ],
+  "latency_ms_p50": 3.718419000506401,
+  "latency_ms_p95": 4.232806121581234,
+  "val_images": 120,
+  "notes": "PTQ INT8 of yolov8n_cat_distilled (US-006 KD); calibration=200 frames; pipeline reuses training.edge.yolo.export_quantize.export_and_quantize"
+}

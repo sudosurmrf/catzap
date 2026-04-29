@@ -1,0 +1,17 @@
+{
+  "story_id": "US-009",
+  "model_path": "training/edge/models/nanodet_cat_0.5x_224_int8.tflite",
+  "model_format": "tflite_int8",
+  "map50": 0.0,
+  "size_bytes": 1613072,
+  "params": 47565308,
+  "flops": 0,
+  "input_hw": [
+    416,
+    416
+  ],
+  "latency_ms_p50": 56.21214650454931,
+  "latency_ms_p95": 57.20771496853558,
+  "val_images": 120,
+  "notes": "DEVIATION: cat-finetuned .pth not yet produced (US-008 gated on isolated venv); INT8 PTQ pipeline run against the US-007 pretrained ONNX (1.0x @ 416). Canonical filename nanodet_cat_0.5x_224_int8.tflite is a symlink to nanodet_plus_m_pretrained_int8.tflite. Once setup_venv.sh produces the cat .pth, re-run the same export_quantize.py pipeline at imgsz=224 to replace this artifact."
+}

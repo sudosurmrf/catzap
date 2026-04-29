@@ -1,0 +1,17 @@
+{
+  "story_id": "US-003-yolov8n-stock-on-us002-val",
+  "model_path": "yolov8n.pt",
+  "model_format": "pytorch",
+  "map50": 0.6363636363636365,
+  "size_bytes": 6534387,
+  "params": 3157200,
+  "flops": 542524864,
+  "input_hw": [
+    224,
+    224
+  ],
+  "latency_ms_p50": 5.200692496146075,
+  "latency_ms_p95": 6.341487163444981,
+  "val_images": 120,
+  "notes": "stock yolov8n COCO @ 224px on US-002 val set (apples-to-apples re-baseline for US-003)"
+}

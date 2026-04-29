@@ -1,0 +1,57 @@
+#!/usr/bin/env python3
+"""Minimal unzip shim — TFLM's download_and_extract.sh shells out to /usr/bin/unzip
+and the developer machine doesn't have it. We support exactly the invocations
+that script uses:
+
+    unzip <file>                # extract into cwd
+    unzip <file> -d <dir>       # extract into <dir>
+    unzip -o <file> -d <dir>    # same, force overwrite (we always overwrite)
+    unzip -q <file> [-d <dir>]  # quiet (we ignore the flag)
+
+Anything else exits non-zero.
+"""
+from __future__ import annotations
+
+import os
+import shutil
+import sys
+import zipfile
+from pathlib import Path
+
+
+def main(argv: list[str]) -> int:
+    args = list(argv)
+    args.pop(0)
+    # Strip flags we recognize.
+    keep = []
+    extract_dir: Path | None = None
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a in ("-q", "-qq", "-o", "-n"):
+            i += 1
+            continue
+        if a == "-d":
+            i += 1
+            if i >= len(args):
+                sys.stderr.write("unzip: -d requires a directory argument\n")
+                return 2
+            extract_dir = Path(args[i])
+            i += 1
+            continue
+        keep.append(a)
+        i += 1
+    if len(keep) != 1:
+        sys.stderr.write(f"unzip: expected one zip path, got {keep}\n")
+        return 2
+    src = Path(keep[0])
+    if extract_dir is None:
+        extract_dir = Path.cwd()
+    extract_dir.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(src) as zf:
+        zf.extractall(extract_dir)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))
