@@ -1,0 +1,17 @@
+{
+  "story_id": "iter-B_imgsz_256_eval",
+  "model_path": "training/edge/models/sweep_imgsz/yolov8n_cat_distilled_int8_pc_256.tflite",
+  "model_format": "tflite_int8",
+  "map50": 0.20400101212158742,
+  "size_bytes": 3222664,
+  "params": 10286369,
+  "flops": 0,
+  "input_hw": [
+    256,
+    256
+  ],
+  "latency_ms_p50": 4.853019505389966,
+  "latency_ms_p95": 6.274275707255583,
+  "val_images": 120,
+  "notes": ""
+}

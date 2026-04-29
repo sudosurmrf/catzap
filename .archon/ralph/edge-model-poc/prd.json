@@ -337,8 +337,8 @@
         "iter-A"
       ],
       "priority": 14,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented in iter-B follow-on iteration. Files: training/edge/yolo/imgsz_sweep.py (CLI + sweep() with quantize/eval/bench/baseline DI seams + per-imgsz failure isolation), training/edge/tests/test_imgsz_sweep.py (7 mocked tests covering iter-A baseline reuse, blocked-imgsz isolation, regress detection, schema parity with iter-A_per_channel_quant, and the aggregator's pick_winner), training/edge/results/aggregate_iter_b.py (markdown summary picking smallest-imgsz-with-mAP-held + latency >=15% better), training/edge/results/iter-B_imgsz_{192,224,256,288,320}.json (5 rollups + 5 eval sidecars + 5 tflm sidecars), training/edge/results/iter-B_summary.md, .gitignore (sweep_imgsz/). Real measured numbers: every smaller imgsz collapses cls (192 -> mAP=0; the .pt was trained at 224), every larger imgsz holds mAP within 1.7 mAP-points but pays 26-91% more arena and 31-107% more latency. No imgsz qualifies under the iter-B winner rule (mAP within 1pt AND latency >=15% better). 224 verdict='equal' (reproduces iter-A); 192/256/288/320 verdict='regress'. Recommendation: stay at imgsz=224. Real efficiency lever is iter-E (width=0.75x retrain) or a future smaller-crop retrain story, NOT post-hoc imgsz reduction. 140/140 edge tests pass; server/ untouched."
     },
     {
       "id": "iter-C",

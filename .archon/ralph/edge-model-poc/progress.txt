@@ -1,5 +1,56 @@
 ## Codebase Patterns
 
+### Sweep orchestrator with per-row failure isolation
+- Where: `training/edge/yolo/imgsz_sweep.py:sweep` +
+  `training/edge/tests/test_imgsz_sweep.py::test_sweep_continues_past_a_single_quantize_failure`
+- Pattern: iter-B/C/E-style "run the same pipeline N times with different
+  knobs" orchestrators MUST isolate failures per row. Wrap each of
+  quantize / eval / bench in its own `try/except Exception`; on failure,
+  set `blocked_reason` and `eval_dict=None`/`tflm_dict=None` for THAT row
+  only and continue. Then build the rollup with `build_pareto_verdict`'s
+  `blocked_reason=...` short-circuit so the row appears in the JSON with
+  `status="blocked"`. Never let a single bad knob abort the rest of the
+  sweep. iter-H aggregator counts "every iter-* row that wrote a JSON",
+  so silent-drop is much worse than blocked-row.
+
+### Aggregator load_rollups must skip eval/bench sidecars
+- Where: `training/edge/results/aggregate_iter_b.py:load_rollups` +
+  test_aggregate_iter_b_picks_smallest_qualifying_imgsz
+- Pattern: the sweep writes BOTH the rollup `iter-B_imgsz_<N>.json` AND
+  per-step sidecars `iter-B_imgsz_<N>_eval.json` /
+  `iter-B_imgsz_<N>_bench-tflm.json` (so the inner eval+bench are
+  inspectable independently of the rollup). Glob-based loaders must
+  filter on a rollup-only key (here: `"imgsz" in d and "candidate_metrics"
+  in d`) — without that filter the aggregator KeyErrors on the first
+  sidecar. Same gotcha will hit iter-C/E aggregators.
+
+### baseline_metrics uses iter-A's candidate_metrics, NOT US-006-int8
+- Where: `training/edge/yolo/imgsz_sweep.py:_baseline_metrics_from_iter_a`
+  + `training/edge/results/iter-A_per_channel_quant.json`
+- Pattern: iter-B onwards compares against iter-A's `candidate_metrics`
+  (its own measured numbers), not against US-006-int8 (iter-A's own
+  baseline). This means iter-A is the strict accuracy floor for
+  iter-B/C/E even though its Pareto verdict against US-006-int8 was
+  `equal`. The aggregate_iter_a.py ingestion path stamps iter-A's
+  numbers into `candidate_metrics`, and iter-B reads them via
+  `_baseline_metrics_from_iter_a(load_iter_a_aggregate())`. Don't try
+  to chase the chain back to US-006 — let iter-A's already-computed
+  numbers stand.
+
+### YOLOv8 eval-time imgsz must match training imgsz
+- Where: `training/edge/results/iter-B_imgsz_192.json` (mAP=0)
+  + `training/edge/results/iter-B_imgsz_320.json` (mAP=-0.016 abs)
+- Pattern: re-quantizing a YOLOv8n.pt at eval-time imgsz != train-time
+  imgsz (224) collapses cls accuracy. At imgsz=192, mAP drops to 0
+  entirely (the model never saw 192-pixel crops, so the head's
+  receptive-field math falls apart). At imgsz=256/288/320, mAP holds
+  within ~1.7 mAP-points but the arena ALMOST doubles by 320 (532 KB ->
+  1.32 MB) and predicted P4 latency more than doubles (4.2s -> 12.1s).
+  Conclusion: imgsz reduction is NOT a post-hoc lever — it requires a
+  retrain at the target imgsz. iter-E's width=0.75x retrain story is
+  the right place to also retrain at smaller imgsz; iter-B's negative
+  finding is what justifies prioritizing that.
+
 ### iter-* JSON shape: {eval, tflm, pareto, candidate_metrics, baseline_metrics}
 - Where: `training/edge/results/aggregate_iter_a.py` +
   `training/edge/yolo/per_channel_quant.build_pareto_verdict`
@@ -1421,5 +1472,116 @@ sequence (`setup_venv.sh && train_nanodet_cat.py && export_quantize.py
 - The eval harness's tflite_adapter handles float32 output natively
   through `_dequantize` (no-op when arr is already float). No adapter
   changes needed for iter-A.
+
+---
+
+## 2026-04-28 — iter-B: Input resolution sweep on the iter-A frontier
+
+**Status**: PASSED (no winner — clean negative finding)
+
+**Files changed**:
+- training/edge/yolo/imgsz_sweep.py — CLI + `sweep()` orchestrator with
+  DI seams on quantize / eval / bench / baseline_loader. Per-imgsz
+  failure isolation: any single imgsz that fails to quantize / eval /
+  bench is recorded `status="blocked"` with a concrete reason; the
+  loop keeps going. Rollup JSON shape mirrors iter-A_per_channel_quant.json
+  for iter-H ingestion uniformity.
+- training/edge/tests/test_imgsz_sweep.py — 7 mocked tests covering
+  iteration order, blocked-imgsz isolation, mAP-regress detection,
+  baseline = iter-A's candidate_metrics, comma-separated CLI parsing,
+  full-chain DI, and the aggregator's pick_winner.
+- training/edge/results/aggregate_iter_b.py — markdown summary
+  generator. `pick_winner()` rule: smallest imgsz that holds mAP within
+  1 mAP-point of iter-A AND wins >=15% on predicted-P4 latency.
+  Filters out per-step sidecar JSONs to avoid KeyError on `imgsz`.
+- training/edge/results/iter-B_imgsz_{192,224,256,288,320}.json — 5 rollups
+- training/edge/results/iter-B_imgsz_*_eval.json — 5 eval sidecars
+- training/edge/results/iter-B_imgsz_*_bench-tflm.json — 5 TFLM sidecars
+- training/edge/results/iter-B_summary.md — comparison table + winner
+  rule + recommendation
+- .gitignore — `training/edge/models/sweep_imgsz/` (5 .tflite are
+  regenerable from `python -m training.edge.yolo.imgsz_sweep`)
+
+**Acceptance criteria verified**:
+- [x] `training/edge/yolo/imgsz_sweep.py` CLI with `--model`, `--imgsz-list`,
+      `--calib-dir`, `--out-dir` produces one .tflite per imgsz under
+      `training/edge/models/sweep_imgsz/yolov8n_cat_distilled_int8_pc_<N>.tflite`.
+- [x] For each imgsz, eval + edge-bench ran and `iter-B_imgsz_<N>.json`
+      written with the same shape as `iter-A_per_channel_quant.json`
+      (`eval` + `tflm` + `pareto` verdict vs iter-A frontier).
+- [x] `iter-B_summary.md` written with the comparison table and the
+      winner-rule explanation. Real result: no imgsz qualifies — every
+      smaller crop crosses the mAP-regress floor, every larger crop is
+      slower with no accuracy gain.
+- [x] Re-uses `training.edge.yolo.per_channel_quant.export_per_channel_int8`
+      as the inner quantize step (no converter logic duplication).
+      Confirmed: `_default_quantize_fn` calls `export_per_channel_int8`.
+- [x] Re-uses the existing eval harness `imgsz` flag — `_default_eval_fn`
+      calls `training.edge.eval.run_eval.evaluate(model_path, "tflite_int8",
+      story_id, val_dir, imgsz=imgsz)`. No edits to `run_eval.py` or any
+      adapter.
+- [x] Per-imgsz failure isolation: covered by
+      `test_sweep_continues_past_a_single_quantize_failure` — a synthetic
+      RuntimeError at imgsz=256 produces `status="blocked"` for that row
+      while the other 4 imgsz still produce passed JSONs.
+- [x] `training/edge/tests/test_imgsz_sweep.py` — 7 mocked tests
+      (>=3 required; 7 actual). All run in <100 ms with no TF / cv2 /
+      ultralytics / edgebench-binary dependency.
+- [x] No diff on server/ (verified: `git diff --stat -- server/` empty).
+      `python -c "from server.vision.detector import CatDetector"` passes.
+- [x] `pytest -p no:asyncio training/edge/tests/` — 140 passed
+      (133 prior + 7 new).
+
+**Real measured numbers** (every imgsz vs iter-A baseline mAP=0.2155,
+arena=692,912 B, predicted P4 ms p50=5,820.51):
+
+| imgsz | mAP    | mAP delta | size      | arena (Δ%)  | P4 ms p50 (Δ%)  | P4 fps | verdict |
+|-------|--------|-----------|-----------|-------------|-----------------|--------|---------|
+| 192   | 0.0000 | -0.2155   | 3,220,672 | 532,144 -23%| 4,244.81 -27%   | 0.236  | regress |
+| 224   | 0.2155 | +0.0000   | 3,221,672 | 692,912  +0%| 5,796.17  -0.4% | 0.173  | equal   |
+| 256   | 0.2040 | -0.0115   | 3,222,664 | 878,256 +27%| 7,651.81 +31%   | 0.131  | regress |
+| 288   | 0.1983 | -0.0172   | 3,224,432 | 1,088,176+57%| 9,772.54 +68%  | 0.102  | regress |
+| 320   | 0.1995 | -0.0160   | 3,225,624 | 1,322,672+91%|12,062.99+107%  | 0.083  | regress |
+
+**Winner**: NONE. Recommendation in iter-B_summary.md: stay at iter-A's
+imgsz=224. Input resolution is not the right efficiency lever for THIS
+checkpoint (which was trained at 224); iter-E's width=0.75x retrain or
+a future smaller-crop retrain story is the right path.
+
+**Learnings**:
+- The imgsz=192 mAP=0 result is striking but expected: YOLOv8 trained at
+  224 has Detect-head receptive-field math that doesn't gracefully scale
+  to 192-pixel crops. The cls collapse from US-004 (per-tensor output
+  quant) is NOT what's happening here — the float32-output dequant from
+  iter-A is still in place; the cls activations themselves are simply
+  bad at this resolution. Probing this with --confidence-threshold=0.05
+  on an offline run might recover non-zero predictions but doesn't fix
+  the underlying problem. Not worth chasing without retraining.
+- imgsz=256/288/320 lose ~1.2-1.7 mAP-points (small) but cost 27-91%
+  more arena. Predictably: arena scales with H*W*channels for the
+  intermediate feature maps, and CONV_2D total_us scales similarly.
+  The size_bytes is essentially flat across the sweep (~3.22 MB
+  +/- 5 KB) because input resolution doesn't change the weight count.
+- The Pareto thresholds (15%/20%/15%) are tight enough that even a
+  pure-positive imgsz move (no mAP loss, +27% arena win at 192) gets
+  vetoed because mAP has to hold first. That's the intended behavior —
+  v2's accuracy floor is non-negotiable.
+- The iter-A baseline reproduces almost exactly at imgsz=224
+  (mAP=0.2155 same; latency -0.42% / arena +0% / size +0.02%).
+  This is a useful sanity check that the sweep pipeline is
+  byte-equivalent to the iter-A standalone export — any iteration
+  that re-runs the iter-A model at imgsz=224 should land within
+  ~0.5% on every axis.
+- The aggregator's `load_rollups` glob pattern (`iter-B_imgsz_*.json`)
+  picks up sidecar JSONs from the eval / bench steps. Filter on
+  `"imgsz" in d and "candidate_metrics" in d` to keep only the rollup
+  shape. Codified as a top-level pattern so iter-C/E aggregators don't
+  re-hit this trap.
+- `firmware/edge-bench/` has a hyphen so it's not a valid Python
+  package — the existing test `test_tflm_bench_parser.py` works
+  around this with `sys.path.insert(0, str(_BENCH_DIR))`. The sweep's
+  `_default_bench_fn` mirrors that pattern at module import time,
+  not on first call, so both behaviors and the test's stub-replacement
+  work identically.
 
 ---

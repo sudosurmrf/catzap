@@ -47,6 +47,11 @@ training/edge/models/*.tflite
 training/edge/models/*.tflite.export.json
 training/edge/models/*_saved_model/
 
+# iter-B imgsz sweep artifacts — regenerable via
+# `python -m training.edge.yolo.imgsz_sweep`. One .tflite per imgsz at
+# `training/edge/models/sweep_imgsz/yolov8n_cat_distilled_int8_pc_<N>.tflite`.
+training/edge/models/sweep_imgsz/
+
 # US-005 QAT intermediate checkpoint — regenerable via
 # `python -m training.edge.yolo.qat_finetune`. The downstream artifact
 # US-011 actually consumes is the .tflite (also gitignored), so the .pt
