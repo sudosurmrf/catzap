@@ -47,11 +47,27 @@ training/edge/models/*.tflite
 training/edge/models/*.tflite.export.json
 training/edge/models/*_saved_model/
 
+# iter-B imgsz sweep artifacts — regenerable via
+# `python -m training.edge.yolo.imgsz_sweep`. One .tflite per imgsz at
+# `training/edge/models/sweep_imgsz/yolov8n_cat_distilled_int8_pc_<N>.tflite`.
+training/edge/models/sweep_imgsz/
+
 # US-005 QAT intermediate checkpoint — regenerable via
 # `python -m training.edge.yolo.qat_finetune`. The downstream artifact
 # US-011 actually consumes is the .tflite (also gitignored), so the .pt
 # is purely intermediate.
 training/edge/models/yolov8n_cat_qat.pt
+
+# iter-C pruned-and-finetuned intermediate checkpoint — regenerable via
+# `python -m training.edge.yolo.prune_channels`. Downstream uses the
+# .tflite (also gitignored). Pure intermediate, same pattern as the
+# QAT checkpoint above.
+training/edge/models/yolov8n_cat_pruned.pt
+
+# iter-E width=0.75x distilled fp32 checkpoint — regenerable via
+# `python -m training.edge.yolo.train_yolov8n_0p75x_cat`. Downstream uses
+# the .tflite (also gitignored). Same intermediate pattern as iter-C.
+training/edge/models/yolov8n_0p75x_cat_distilled.pt
 
 # onnx2tf-internal calibration sample (auto-downloaded; not part of our PoC).
 calibration_image_sample_data_*.npy

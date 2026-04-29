@@ -1,0 +1,17 @@
+{
+  "story_id": "iter-F",
+  "model_path": "training/edge/models/nanodet_cat_0.5x_224_int8_pc.tflite",
+  "model_format": "tflite_int8",
+  "map50": 0.0,
+  "size_bytes": 1613232,
+  "params": 47565308,
+  "flops": 0,
+  "input_hw": [
+    416,
+    416
+  ],
+  "latency_ms_p50": 56.24930851627141,
+  "latency_ms_p95": 57.83338400215143,
+  "val_images": 120,
+  "notes": ""
+}

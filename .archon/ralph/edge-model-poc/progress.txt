@@ -1,5 +1,368 @@
 ## Codebase Patterns
 
+### Off-graph NMS verifier scans op_breakdown, not the .tflite schema
+- Where: `training/edge/eval/decode_only.py:verify_off_graph` +
+  `training/edge/eval/decode_only.py:IN_GRAPH_NMS_OPS` +
+  `training/edge/tests/test_decode_only.py` (3 verifier tests)
+- Pattern: rather than parsing the TFLite flatbuffer schema to look for
+  post-processing ops, scan the op_breakdown the existing edge-bench
+  TimingProfiler already emits. The four canonical "in-graph NMS" op
+  names (TFLite_Detection_PostProcess for SSD, NON_MAX_SUPPRESSION_V4/V5,
+  and TF's CombinedNonMaxSuppression) cover every exporter we've seen.
+  This re-uses the runs=N TFLM bench as the source of truth — no
+  duplicate flatbuffer parsing, and the verifier produces the same
+  result regardless of whether the model came from ultralytics ONNX
+  export, onnx2tf, or a hypothetical future tf.lite-direct path. If a
+  future iteration adds a NEW post-processing op name, add it to
+  `IN_GRAPH_NMS_OPS` (the regression test
+  `test_in_graph_nms_ops_set_covers_known_exporter_outputs` will catch
+  removals).
+
+### onnx2tf YOLOv8 .tflites strip post-processing entirely
+- Where: `training/edge/results/iter-G.md` ("Verifier output" — 16 ops,
+  zero NMS) + `training/edge/results/iter-G_off_graph_nms.json:verifier`
+- Pattern: every YOLOv8 .tflite produced via the v2 PTQ pipeline
+  (ultralytics ONNX export → onnx2tf SavedModel → TFLiteConverter)
+  emits backbone + neck + Detect-head convs ending in a single fp32
+  DEQUANTIZE on the `(1, 5, 1029)` cls/xywh tensor. Decode (xywh /
+  imgsz, threshold, xyxy, clip) and NMS are NOT in the graph — they
+  must run host-side in firmware C. iter-G's runs=200 op_breakdown
+  records this for iter-A's tflite (CONV_2D / LOGISTIC / ADD / MUL /
+  PAD / MAX_POOL_2D / RESIZE_NEAREST_NEIGHBOR / RESHAPE / TRANSPOSE /
+  SPLIT / CONCATENATION / STRIDED_SLICE / SUB / SOFTMAX / QUANTIZE /
+  DEQUANTIZE — 16 ops, none of them NMS). Same shape holds for iter-D
+  / iter-E candidates that share the export pipeline. Future stories
+  swapping to a different export (ultralytics' built-in `format='tflite'`
+  with `nms=True`, or any TF SavedModel containing
+  `tf.image.combined_non_max_suppression`) MUST re-verify.
+
+### Decode + NMS post-process budget is negligible vs YOLOv8n inference
+- Where: `training/edge/results/iter-G.md` ("Post-process budget") +
+  `training/edge/results/iter-G_off_graph_nms.json:post_process_budget`
+- Pattern: at imgsz=224 YOLOv8n emits 1,029 anchors. Decode is one
+  linear scan with ~6 FLOPs/anchor (max(cls), threshold, xywh/imgsz,
+  xywh→xyxy, clip) and NMS is O(K^2) on whatever survives the
+  threshold (typically <5 boxes for single-class cat detection).
+  Estimated cost on ESP32-P4 without ESP-DL: ~0.0154 ms total, vs
+  ~5,785 ms inference (~0.0003%). iter-H's SUMMARY_v2 can cite
+  `predicted_p4_ms_p50` directly as the v2 frontier latency without
+  budgeting extra time for off-graph post-process.
+
+### runs=200 edge-bench drift vs runs=50 is sub-1%
+- Where: `training/edge/results/iter-G_off_graph_nms.json:drift_vs_runs50`
+- Pattern: re-running iter-A's TFLM bench at 200 samples (vs 50 in
+  iter-A through iter-F) shifts p50 by -0.62% and p95 by -0.01% on
+  this hardware. Tight enough that the Pareto verdicts in iter-A
+  through iter-F do NOT need re-evaluation against runs=200 samples;
+  iter-H can cite the runs=50 numbers uniformly. Future iterations
+  that need especially tight p50/p95 (e.g. comparing two latency-
+  matched candidates at the 1% margin) should bump runs to 200, but
+  it's not a blanket requirement.
+
+### iter-A's float-output dequant works on YOLOv8 but NOT NanoDet — predict before applying
+- Where: `training/edge/results/iter-F.md` ("Why YOLOv8 recovered and NanoDet did not")
+  + `training/edge/nanodet/per_channel_quant.py` (thin wrapper that proves the recipe is reusable)
+  + `training/edge/results/iter-F_nanodet_per_channel.json:pareto_vs_nanodet`
+- Pattern: the `inference_output_type=tf.float32` fix that recovered
+  YOLOv8 cls collapse (iter-A: mAP 0->0.215) recovers cls precision in
+  the head's LAST-int8 tensor by deferring dequant to fp32. It does
+  NOT recover precision lost UPSTREAM in the head's INT8 conv layers.
+  YOLOv8 KD-distilled weights carry calibrated cls magnitudes such that
+  the last-int8 tensor preserves enough cls signal; NanoDet-Plus ships
+  pretrained on COCO (no cat KD) and emits cls already-sigmoided
+  alongside unbounded reg-DFL logits, so a per-tensor activation scale
+  on the head's conv outputs is dominated by reg-DFL and quantizes cls
+  AND reg-DFL into near-zero buckets BEFORE the dequant. Diagnostic:
+  every prior anchor predicts the same constant bbox post-quant. When a
+  new architecture lands, predict whether iter-A's recipe will recover
+  PTQ collapse by asking: "does the head's last-int8 tensor carry enough
+  cls signal to be worth dequantizing?". If no, you need head-split ONNX
+  surgery (split cls + reg into separate output tensors so each gets
+  its own activation scale) or fp16 fallback. Don't burn a full iter-*
+  slot on float-output dequant alone for such architectures.
+
+### Dual-baseline Pareto aggregator pattern (same-arch + cross-arch)
+- Where: `training/edge/results/aggregate_iter_f.py:aggregate` (introduces
+  `pareto_vs_nanodet` + `pareto_vs_yolo_v2_frontier` keys)
+  + `_verdict_against` helper for scoring against an arbitrary baseline JSON
+- Pattern: `aggregate_iter_a.py` had ONE baseline; iter-F introduced TWO
+  because the candidate is being scored against (a) its own architectural
+  predecessor (US-009 NanoDet) AND (b) the cross-architecture frontier
+  (iter-A YOLOv8). Both verdicts in one JSON: `pareto_vs_<X>` keys, same
+  schema as the existing `pareto` key but explicitly labeled. This lets
+  iter-H's SUMMARY_v2 ingest cross-architecture comparisons without re-
+  running aggregators. Any future iter-* candidate that's worth comparing
+  against multiple frontiers should follow this shape.
+
+### iter-E finding: narrowing student width WITHOUT INT16 activations re-triggers cls collapse
+- Where: `training/edge/results/iter-E.md` ("Why mAP collapsed at PTQ")
+  + `training/edge/results/iter-E_yolov8n_0p75x.json:pareto.deltas`
+- Pattern: KD distillation at 0.75x effective width (= 0.1875 stamped
+  vs YOLOv8 base; ~57% of yolov8n params) reproduces iter-A's PTQ
+  pipeline byte-for-byte but mAP collapses 0.215 -> 0.000 because the
+  narrower cls activations carry less magnitude than the per-tensor
+  quantizer can preserve. Three independent confirmations now (v1
+  US-004, iter-C finetune-only, iter-E narrower student) — KD-shaped
+  cls signal at YOLOv8n full width is the MINIMUM viable bar for
+  iter-A's PTQ pipeline to work. Any future "make YOLOv8 smaller" lever
+  must either stack iter-D's INT16x8 quant on top, surgically split the
+  Detect head, or accept mAP=0 under the per-channel-friendly recipe.
+
+### width_multiple is a 2-space variable: user-facing vs yaml-stamped
+- Where: `training/edge/yolo/train_yolov8n_0p75x_cat.py:regenerate_config`
+  + `test_regenerate_config_composes_with_yolov8n_base`
+- Pattern: ultralytics' `parse_model` interprets the yaml's
+  `width_multiple` as a fraction of YOLOv8 BASE channel widths, NOT
+  yolov8n's. yolov8n's effective width is already 0.25 (vs YOLOv8 base);
+  yolov8s is 0.5; yolov8m is 0.75. So a "0.75x of yolov8n" model
+  actually wants `width_multiple = 0.25 * 0.75 = 0.1875` stamped into
+  the yaml. The iter-E wrapper exposes the user-facing 0.75 on the CLI
+  and composes it with yolov8n's 0.25 base before stamping. Surface the
+  user-facing knob in any rollup JSON's audit trail (the yaml number is
+  not what the user typed). Same pattern applies for `depth_multiple`
+  (yolov8n base = 0.33, iter-E default user-facing = 1.0 -> stamped
+  0.33 = unchanged).
+
+### KD without .pt round-trip: patch_student_loss_for_distill on live instance
+- Where: `training/edge/yolo/train_yolov8n_0p75x_cat.py:_default_distill_train_fn`
+  + `training/edge/yolo/distill_train.py:patch_student_loss_for_distill`
+- Pattern: `train_distilled` (US-006) takes a `student_pt: Path` because
+  it reloads via `YOLO(student_pt)` and trains. YAML-built models have
+  no populated `self.ckpt` dict, so `student.save()` cannot round-trip
+  the partial-loaded weights — calling `train_distilled(student_pt=...)`
+  on a saved-yaml-built student loses the partial-load. The fix:
+  manually do what `train_distilled` does internally — instantiate a
+  teacher YOLO, register `patch_student_loss_for_distill` on the LIVE
+  student via `student.add_callback("on_train_start", _on_train_start)`,
+  then call `student.train(...)` directly. Net effect is byte-identical
+  to `train_distilled` minus the .pt round-trip. Reusable for any
+  future YAML-built / partially-initialized / distilled training flow.
+
+### partial_load_yolov8n_weights: slice donor channels to fit narrower student
+- Where: `training/edge/yolo/train_yolov8n_0p75x_cat.py:partial_load_yolov8n_weights`
+- Pattern: when initializing a narrower student from a wider donor
+  (yolov8n -> 0.75x; yolov8s -> yolov8n; etc.), strict
+  `load_state_dict` fails on every Conv2d. Walk donor.state_dict() and
+  for each matched key, slice the donor tensor to the student's smaller
+  shape along ALL leading axes (`tuple(slice(0, s) for s in
+  student_tensor.shape)`). Returns a `summary` dict with `loaded_keys
+  / matched_keys_total / skipped_missing_in_student /
+  skipped_mismatched_shape / fallback_random_init / error?` so iter-H
+  / future code can audit how much of the init is real vs random. On
+  the iter-E run: 355/355 keys all loaded successfully — slicing
+  works for every conv when the donor is wider on every axis. If donor
+  load fails at the YOLO() step (file missing / corrupt), gracefully
+  falls back to random init with `fallback_random_init=True` and an
+  `error` field — per the AC: "from-scratch if the partial load fails".
+
+### iter-D finding: INT16 activations stack with iter-A float-output for huge mAP recovery
+- Where: `training/edge/yolo/mixed_int_quant.py` +
+  `training/edge/results/iter-D.md` ("Why this works")
+- Pattern: iter-A's float32 output dequant fixed cls collapse on the
+  output side (one DEQUANTIZE op after the head). iter-D is the
+  orthogonal internal-side fix: promote ALL activations to INT16 via
+  `EXPERIMENTAL_TFLITE_BUILTINS_ACTIVATIONS_INT16_WEIGHTS_INT8`. INT16
+  has 256x the dynamic range of INT8, so the head's pre-output
+  `(1, 5, 1029)` activation tensor can carry xywh and cls under one
+  per-tensor scale without crushing cls. Stacked, iter-A + iter-D
+  recover +0.273 absolute mAP (0.215 -> 0.488) over iter-A alone.
+  Cost: arena 2x (INT16 activations are 2x int8); P4 latency
+  unchanged on TFLM reference path. Weights stay INT8 / per-channel
+  so on-disk size is +2.4% only.
+
+### Mixed INT8/INT16 model is TFLM-compatible (op coverage held)
+- Where: `training/edge/results/iter-D-tflm.json:tflm_compatible` +
+  `training/edge/results/iter-D.md` ("TFLM compatibility")
+- Pattern: PRD's technical notes warned that the INT16x8 path might
+  trip TFLM's incomplete INT16 op coverage. Real result: every
+  INT16-activation op the converter emits (CONV_2D, MUL, LOGISTIC,
+  ADD, PAD, SOFTMAX, SPLIT, ...) IS implemented in TFLM's standard
+  op resolver. `allocate_tensors_status=ok`,
+  `tflm_compatible=true`. CONV_2D shifts from 92.5% (iter-A) to
+  98.83% (iter-D) of total inference time — INT16 raises CONV_2D's
+  compute cost more than proportionally vs lighter ops, but the
+  shift is internal and doesn't break compat. Future iterations that
+  need to recover cls precision under INT8-only mandates (e.g.
+  ESP-DL targets that don't support INT16 conv) will need the
+  head-split path (path (2) in PRD); for the current ESP32-P4
+  target the INT16x8 builtin is the simpler path.
+
+### tflite_adapter input cast keys off model dtype, not the is_int8 flag
+- Where: `training/edge/eval/adapters/tflite_adapter.py:_preprocess`
+- Pattern: the input-dtype branch used to be
+  `if in_dt == np.int8 OR self.is_int8`. iter-D's float-IO INT16x8
+  model exposes float32 input even though it's quantized internally,
+  and the OR condition forced an int8 cast that crashed the
+  interpreter. Fix: respect `input_details[0]['dtype']` (the
+  authoritative source from `allocate_tensors()`) only. The
+  `is_int8` flag is now purely informational — it does NOT force a
+  cast. Behavior preserved exactly for every v1 / iter-A INT8 model
+  (their `in_dt` is already int8, so the int8 branch still fires);
+  iter-A's mAP=0.215478 reproduces bit-exact post-tweak. Future
+  formats with float-or-int16 IO get adapter-compat for free.
+
+### iter-C finding: soft prune + supervised-only finetune erodes KD cls signal
+- Where: `training/edge/results/iter-C.md` ("Why mAP collapsed at PTQ —
+  the diagnosis") + `training/edge/yolo/prune_channels.py:_default_trainer_fn`
+- Pattern: iter-A's mAP=0.215 INT8 only survives because US-006 KD
+  shaped the cls logits to a magnitude the per-tensor activation
+  quantizer can preserve. Any post-hoc finetune of the iter-A `.pt`
+  that uses ONLY supervised loss (no distillation signal) drifts the
+  cls activation distribution back toward magnitudes the quantizer
+  crushes — re-triggering the v1 PTQ cls collapse pattern. iter-C's
+  result (fp32 mAP 0.706, INT8 mAP 0.000) is the empirical proof.
+  Future "modify the .pt then re-quantize via iter-A" work (iter-E
+  retrain at width=0.75x is OK because it re-runs distill_train; but
+  any prune/finetune-only flow should keep KD in the loop).
+
+### iter-C finding: soft prune does NOT shrink TFLite arena or size
+- Where: `training/edge/results/iter-C.md` ("Numbers" table)
+- Pattern: zeroing 25 % of `Conv2d` output channels via
+  `torch.nn.utils.prune.LnStructured` + `prune.remove` produces
+  identical .tflite size (within 168 B), identical arena_used_bytes
+  (within 128 B), and identical predicted P4 latency (within 0.6 %).
+  Reason: the per-channel weight scale tables, the int8 zero points,
+  and the convolution Op metadata don't shrink when channels go to
+  zero — only the raw weight bytes (which compress, but the
+  flatbuffer alignment overhead dominates at this model scale).
+  Realizing soft-prune as a real efficiency lever requires hard
+  channel removal + Detect-head re-init (out of scope for iter-C;
+  candidate for a follow-on dedicated story).
+
+### ultralytics `device='auto'` literal fails on CUDA-less hosts
+- Where: `training/edge/yolo/prune_channels.py:DEFAULT_DEVICE` +
+  `training/edge/yolo/prune_channels.py:_default_trainer_fn`
+- Pattern: ultralytics 8.2's `select_device('auto')` raises
+  `ValueError: Invalid CUDA 'device=auto' requested` when
+  `torch.cuda.is_available()` is False. The two safe defaults are
+  `device=''` (empty string lets ultralytics pick CUDA/MPS/CPU
+  automatically) or `device='cpu'` (force CPU). iter-C codified
+  `DEFAULT_DEVICE = ""` and added a CLI `--device` flag. Existing
+  US-003 / US-006 train scripts use `device='auto'` and have so far
+  worked because they ran on CUDA-equipped hosts; future stories
+  that need to run on a CUDA-less dev box should follow iter-C's
+  empty-string convention.
+
+### Sweep orchestrator with per-row failure isolation
+- Where: `training/edge/yolo/imgsz_sweep.py:sweep` +
+  `training/edge/tests/test_imgsz_sweep.py::test_sweep_continues_past_a_single_quantize_failure`
+- Pattern: iter-B/C/E-style "run the same pipeline N times with different
+  knobs" orchestrators MUST isolate failures per row. Wrap each of
+  quantize / eval / bench in its own `try/except Exception`; on failure,
+  set `blocked_reason` and `eval_dict=None`/`tflm_dict=None` for THAT row
+  only and continue. Then build the rollup with `build_pareto_verdict`'s
+  `blocked_reason=...` short-circuit so the row appears in the JSON with
+  `status="blocked"`. Never let a single bad knob abort the rest of the
+  sweep. iter-H aggregator counts "every iter-* row that wrote a JSON",
+  so silent-drop is much worse than blocked-row.
+
+### Aggregator load_rollups must skip eval/bench sidecars
+- Where: `training/edge/results/aggregate_iter_b.py:load_rollups` +
+  test_aggregate_iter_b_picks_smallest_qualifying_imgsz
+- Pattern: the sweep writes BOTH the rollup `iter-B_imgsz_<N>.json` AND
+  per-step sidecars `iter-B_imgsz_<N>_eval.json` /
+  `iter-B_imgsz_<N>_bench-tflm.json` (so the inner eval+bench are
+  inspectable independently of the rollup). Glob-based loaders must
+  filter on a rollup-only key (here: `"imgsz" in d and "candidate_metrics"
+  in d`) — without that filter the aggregator KeyErrors on the first
+  sidecar. Same gotcha will hit iter-C/E aggregators.
+
+### baseline_metrics uses iter-A's candidate_metrics, NOT US-006-int8
+- Where: `training/edge/yolo/imgsz_sweep.py:_baseline_metrics_from_iter_a`
+  + `training/edge/results/iter-A_per_channel_quant.json`
+- Pattern: iter-B onwards compares against iter-A's `candidate_metrics`
+  (its own measured numbers), not against US-006-int8 (iter-A's own
+  baseline). This means iter-A is the strict accuracy floor for
+  iter-B/C/E even though its Pareto verdict against US-006-int8 was
+  `equal`. The aggregate_iter_a.py ingestion path stamps iter-A's
+  numbers into `candidate_metrics`, and iter-B reads them via
+  `_baseline_metrics_from_iter_a(load_iter_a_aggregate())`. Don't try
+  to chase the chain back to US-006 — let iter-A's already-computed
+  numbers stand.
+
+### YOLOv8 eval-time imgsz must match training imgsz
+- Where: `training/edge/results/iter-B_imgsz_192.json` (mAP=0)
+  + `training/edge/results/iter-B_imgsz_320.json` (mAP=-0.016 abs)
+- Pattern: re-quantizing a YOLOv8n.pt at eval-time imgsz != train-time
+  imgsz (224) collapses cls accuracy. At imgsz=192, mAP drops to 0
+  entirely (the model never saw 192-pixel crops, so the head's
+  receptive-field math falls apart). At imgsz=256/288/320, mAP holds
+  within ~1.7 mAP-points but the arena ALMOST doubles by 320 (532 KB ->
+  1.32 MB) and predicted P4 latency more than doubles (4.2s -> 12.1s).
+  Conclusion: imgsz reduction is NOT a post-hoc lever — it requires a
+  retrain at the target imgsz. iter-E's width=0.75x retrain story is
+  the right place to also retrain at smaller imgsz; iter-B's negative
+  finding is what justifies prioritizing that.
+
+### iter-* JSON shape: {eval, tflm, pareto, candidate_metrics, baseline_metrics}
+- Where: `training/edge/results/aggregate_iter_a.py` +
+  `training/edge/yolo/per_channel_quant.build_pareto_verdict`
+- Pattern: every v2 follow-on iteration (iter-A..iter-G) emits ONE
+  rollup JSON at `training/edge/results/iter-<X>_<slug>.json` whose
+  schema is: `{story_id, title, status:"passed"|"blocked",
+  blocked_reason, model_path, p4_multiplier, p4_multiplier_source,
+  eval:<EvalResult>, tflm:<run_bench shape>, pareto:<verdict-dict>,
+  candidate_metrics:{map50,size_bytes,arena_used_bytes,
+  predicted_p4_latency_ms_p50,predicted_p4_fps},
+  baseline_metrics:{...}}`. The iter-H synthesis script
+  (aggregate_summary_v2) ingests these uniformly. Always include all
+  fields even on `status="blocked"` so the iter-H matrix can render the
+  attempt — never silently drop a blocked iteration.
+
+### build_pareto_verdict: hard-coded thresholds, named-baseline arg
+- Where: `training/edge/yolo/per_channel_quant.build_pareto_verdict` +
+  module-top constants (`MAP_REGRESS_TOLERANCE`, `LATENCY_IMPROVE_PCT=15.0`,
+  `SIZE_IMPROVE_PCT=20.0`, `ARENA_IMPROVE_PCT=15.0`)
+- Pattern: Pareto verdict thresholds come from the user message's v2
+  follow-on rules — they are NOT runtime knobs. Tests assert the exact
+  threshold values so a future iteration can't silently relax them.
+  Verdicts: `dominates` (mAP held + 1+ axis past threshold), `equal`
+  (mAP held + no axis past threshold), `regress` (mAP dropped),
+  `blocked` (caller passes `blocked_reason`). Caller MUST pass a named
+  baseline_story (e.g. "US-006-int8") so the verdict is auditable.
+
+### ESP32-P4 latency multiplier: 5.0 (vs S3's 8.0)
+- Where: `training/edge/yolo/per_channel_quant.DEFAULT_P4_MULTIPLIER` +
+  `_P4_MULTIPLIER_SOURCE` (string)
+- Pattern: P4 has 400 MHz dual-core RV32 with PIE/vector ext (vs S3's
+  240 MHz single-core for ML). Without ESP-DL acceleration the scalar
+  reference path is ~5-6x slower than x86; with vector ext ~3x. We use
+  5.0 as the conservative midpoint. Every iter-A..iter-G aggregator
+  records its multiplier choice in the JSON's `p4_multiplier` +
+  `p4_multiplier_source` fields so iter-H can re-do the math with a
+  different multiplier once real boards arrive.
+
+### YOLOv8 PTQ cls-collapse fix #2: float32 OUTPUT dequant
+- Where: `training/edge/yolo/per_channel_quant.quantize_to_int8_float_output_tflite`
+  + iter-A.md "Why this works"
+- Pattern: the cls-collapse documented in v1 progress.txt
+  ("YOLOv8 PTQ + per-tensor output quant collapses cls head") has TWO
+  orthogonal fixes — (1) US-006 KD which shapes student-side
+  activations the calibrator sees, and (2) iter-A's
+  `inference_output_type=tf.float32` which appends a DEQUANTIZE op so
+  the head reads out at full float resolution. Combined they recover
+  0.0 mAP -> 0.215 mAP under PTQ. The architecturally pure fix
+  (split Detect head into separate cls/xywh tensors via ONNX surgery)
+  is still on the table for a later iteration; for v2 the float-output
+  cost (4x larger output_bytes: 5,145 -> 20,580; ~5 µs per dequant on
+  TFLM x86) is negligible vs the ~1.16 s total invoke time.
+
+### Bootstrap UUIDs are NOT seeded — val/manifest.txt regen pattern
+- Where: `training/edge/auto_label.py:bootstrap` (uuid4().hex calls) +
+  `training/edge/data/regenerate_val_manifest.py` (post-bootstrap repair)
+- Pattern: v1's progress.txt called the bootstrap "deterministic seed=42"
+  but seed=42 only covers IMAGE CONTENT (augmentations / brightness /
+  flip). Filenames go through uuid4() which is unseeded — every fresh
+  worktree's bootstrap produces a DIFFERENT 600-frame UUID set. v1's
+  tracked .txt labels are orphaned because their .jpg counterparts are
+  gitignored and unrecoverable. Workaround: run
+  `python training/edge/data/regenerate_val_manifest.py` AFTER bootstrap
+  + make_dataset_manifest. This rewrites val/manifest.txt to point at
+  the freshly-paired files. iter-A through iter-G ALL need this step
+  in their reproduce sections. A future iteration could swap uuid4()
+  for a seed-derived deterministic ID; out of scope here because doing
+  so would orphan v1's already-tracked labels too.
+
 ### Decision-matrix aggregator: ROW_SPECS + dual-source ingestion
 - Where: `training/edge/results/aggregate_summary.py:ROW_SPECS` +
   `_build_row` + `format_decision_matrix` + `format_recommendation`
@@ -1262,5 +1625,901 @@ sequence (`setup_venv.sh && train_nanodet_cat.py && export_quantize.py
   `test_recommendation_handles_no_int8_winner` — it doesn't run on the
   current real data but it's the safety net for future iterations
   where the export pipeline regresses across all candidates.
+
+---
+
+## 2026-04-28 — iter-A: Per-channel output quantization fix on yolov8n_cat_distilled
+
+**Status**: PASSED (Pareto verdict: equal)
+**Files changed**:
+- training/edge/yolo/per_channel_quant.py — new module: export_per_channel_int8 +
+  quantize_to_int8_float_output_tflite (the iter-A delta vs US-004's pipeline:
+  inference_output_type=tf.float32) + build_pareto_verdict + DEFAULT_P4_MULTIPLIER
+- training/edge/tests/test_per_channel_quant.py — 9 mocked pytest cases:
+  (1) int8-input/float32-output converter config, (2) calibration_loader
+  is-identity vs export_quantize, (3) representative_dataset >= 100 frames,
+  (4) full-DI-chain orchestrator, (5-8) pareto verdict branches
+  (dominates/equal/regress/blocked), (9) representative_dataset callable
+  reaches the converter through the DI chain
+- training/edge/data/regenerate_val_manifest.py — post-bootstrap helper that
+  rebuilds val/manifest.txt + train.txt + val.txt from manifest.json's split
+- training/edge/results/iter-A.json — eval (mAP=0.2155, p50=13.31 ms host CPU)
+- training/edge/results/iter-A-tflm.json — TFLM bench (arena=692,912 B,
+  raw_p50=1,164,102 us, predicted_s3_p50=9,313 ms / fps=0.107)
+- training/edge/results/iter-A_per_channel_quant.json — final aggregate with
+  Pareto verdict='equal' (mAP +0.0108, size +0.005%, arena +0.014%, latency -1.07%)
+- training/edge/results/iter-A.md — rollup report + reproduce section
+- training/edge/results/aggregate_iter_a.py — eval+TFLM+verdict aggregator
+- .archon/ralph/edge-model-poc/prd.json — 8 new userStories (iter-A..iter-H)
+  added to define the v2 follow-on loop scope; iter-A.passes=true with notes
+
+**Acceptance criteria verified**:
+- [x] training/edge/yolo/per_channel_quant.py with export_per_channel_int8 and
+      DI hooks for onnx_exporter / savedmodel_converter / quantizer
+- [x] CLI: `python -m training.edge.yolo.per_channel_quant ...` produced
+      training/edge/models/yolov8n_cat_distilled_int8_pc.tflite (3.07 MB)
+- [x] python -m training.edge.eval.run_eval ... --story-id iter-A produced
+      training/edge/results/iter-A.json with mAP=0.2155
+- [x] python firmware/edge-bench/run_bench.py ... --story-id iter-A produced
+      training/edge/results/iter-A-tflm.json with arena_used=677 KB
+- [x] training/edge/results/iter-A_per_channel_quant.json with eval + tflm +
+      pareto:{verdict, baseline_story, deltas:{map50,size_pct,arena_pct,
+      latency_pct}, p4_multiplier, p4_multiplier_source}
+- [x] training/edge/results/iter-A.md: Pareto verdict + before/after table +
+      cls-collapse explanation citing v1 progress.txt patterns
+- [x] training/edge/tests/test_per_channel_quant.py — 9 cases including the
+      mandatory float32-output assertion + calibration_loader is-identity +
+      representative_dataset >=100 + build_pareto_verdict branches
+- [x] git diff main -- server/ is empty (0 lines)
+- [x] CatDetector import smoke test passes
+- [x] pytest -p no:asyncio training/edge/tests/ — 133 passed (124 v1 + 9 new)
+
+**Real measured numbers**:
+  iter-A vs v1 US-006-int8 baseline (KD distilled INT8):
+    mAP@0.5         0.2155 vs 0.2047  (+0.0108 absolute / +5.3% relative)
+    size_bytes      3,221,000 vs 3,220,840  (+160 / +0.005%)
+    arena_used      692,912 vs 692,816  (+96 / +0.014%)
+    raw x86 p50     1,164,102 us vs 1,176,673 us  (-12,571 / -1.07%)
+    predicted P4 p50  5,820.51 ms vs 5,883.36 ms  (-62.85 / -1.07%, mult=5.0)
+    output_bytes    20,580 (float32) vs 5,145 (int8)  (4x larger; expected)
+    tflm_compatible true vs true
+  Pareto verdict: equal — mAP holds, no efficiency axis crosses thresholds
+  (latency >=15% / size >=20% / arena >=15%), so iter-A is NOT promoted to
+  new frontier under strict v2 rules. But iter-A is the accuracy floor for
+  iter-B/C/E going forward.
+
+**Learnings**:
+- v1's `inference_output_type=tf.int8` was the load-bearing wrong knob — flip
+  to tf.float32 and the cls collapse partially un-collapses (KD already
+  partially un-collapsed the student cls activations; the float dequant
+  preserves whatever survived). Net mAP gain +0.0108 absolute.
+- Same effective cost: arena +96 bytes (a tiny dequant scratch buffer), size
+  +160 bytes (one DEQUANTIZE op + its scale/zero). Latency essentially
+  unchanged (the dequant on (1,5,1029) is ~5 µs out of ~1.16 s total).
+- The 4x output_bytes growth (5,145 -> 20,580) doesn't matter on TFLM/P4 —
+  both fit easily in PSRAM and the dequant is bandwidth-bound on a 32-bit
+  bus, dominated by inference itself.
+- v2's 15%/20%/15% thresholds are tight enough that pure converter knobs
+  (no architectural changes) likely won't promote — iter-B (resolution
+  sweep) and iter-C (channel pruning) are where the size/arena/latency axes
+  should move. iter-A's role is to lift the accuracy floor so iter-B/C
+  candidates can spend their accuracy budget on efficiency.
+- auto_label.bootstrap's uuid4() filenames are NOT seed-deterministic
+  (despite progress.txt's v1 claim). Codified in a new pattern at the top
+  of progress.txt + a small regenerate_val_manifest.py helper. Future
+  iterations need both `auto_label bootstrap` AND `regenerate_val_manifest.py`
+  to repair the val/manifest.txt before eval.
+- Build edgebench had to chmod +x firmware/edge-bench/tools/unzip on this
+  fresh worktree (file came in 644 from git). Filed under "TFLM x86 build
+  caveats". Probably worth a chmod in build.sh itself, but out of scope.
+- The eval harness's tflite_adapter handles float32 output natively
+  through `_dequantize` (no-op when arr is already float). No adapter
+  changes needed for iter-A.
+
+---
+
+## 2026-04-28 — iter-B: Input resolution sweep on the iter-A frontier
+
+**Status**: PASSED (no winner — clean negative finding)
+
+**Files changed**:
+- training/edge/yolo/imgsz_sweep.py — CLI + `sweep()` orchestrator with
+  DI seams on quantize / eval / bench / baseline_loader. Per-imgsz
+  failure isolation: any single imgsz that fails to quantize / eval /
+  bench is recorded `status="blocked"` with a concrete reason; the
+  loop keeps going. Rollup JSON shape mirrors iter-A_per_channel_quant.json
+  for iter-H ingestion uniformity.
+- training/edge/tests/test_imgsz_sweep.py — 7 mocked tests covering
+  iteration order, blocked-imgsz isolation, mAP-regress detection,
+  baseline = iter-A's candidate_metrics, comma-separated CLI parsing,
+  full-chain DI, and the aggregator's pick_winner.
+- training/edge/results/aggregate_iter_b.py — markdown summary
+  generator. `pick_winner()` rule: smallest imgsz that holds mAP within
+  1 mAP-point of iter-A AND wins >=15% on predicted-P4 latency.
+  Filters out per-step sidecar JSONs to avoid KeyError on `imgsz`.
+- training/edge/results/iter-B_imgsz_{192,224,256,288,320}.json — 5 rollups
+- training/edge/results/iter-B_imgsz_*_eval.json — 5 eval sidecars
+- training/edge/results/iter-B_imgsz_*_bench-tflm.json — 5 TFLM sidecars
+- training/edge/results/iter-B_summary.md — comparison table + winner
+  rule + recommendation
+- .gitignore — `training/edge/models/sweep_imgsz/` (5 .tflite are
+  regenerable from `python -m training.edge.yolo.imgsz_sweep`)
+
+**Acceptance criteria verified**:
+- [x] `training/edge/yolo/imgsz_sweep.py` CLI with `--model`, `--imgsz-list`,
+      `--calib-dir`, `--out-dir` produces one .tflite per imgsz under
+      `training/edge/models/sweep_imgsz/yolov8n_cat_distilled_int8_pc_<N>.tflite`.
+- [x] For each imgsz, eval + edge-bench ran and `iter-B_imgsz_<N>.json`
+      written with the same shape as `iter-A_per_channel_quant.json`
+      (`eval` + `tflm` + `pareto` verdict vs iter-A frontier).
+- [x] `iter-B_summary.md` written with the comparison table and the
+      winner-rule explanation. Real result: no imgsz qualifies — every
+      smaller crop crosses the mAP-regress floor, every larger crop is
+      slower with no accuracy gain.
+- [x] Re-uses `training.edge.yolo.per_channel_quant.export_per_channel_int8`
+      as the inner quantize step (no converter logic duplication).
+      Confirmed: `_default_quantize_fn` calls `export_per_channel_int8`.
+- [x] Re-uses the existing eval harness `imgsz` flag — `_default_eval_fn`
+      calls `training.edge.eval.run_eval.evaluate(model_path, "tflite_int8",
+      story_id, val_dir, imgsz=imgsz)`. No edits to `run_eval.py` or any
+      adapter.
+- [x] Per-imgsz failure isolation: covered by
+      `test_sweep_continues_past_a_single_quantize_failure` — a synthetic
+      RuntimeError at imgsz=256 produces `status="blocked"` for that row
+      while the other 4 imgsz still produce passed JSONs.
+- [x] `training/edge/tests/test_imgsz_sweep.py` — 7 mocked tests
+      (>=3 required; 7 actual). All run in <100 ms with no TF / cv2 /
+      ultralytics / edgebench-binary dependency.
+- [x] No diff on server/ (verified: `git diff --stat -- server/` empty).
+      `python -c "from server.vision.detector import CatDetector"` passes.
+- [x] `pytest -p no:asyncio training/edge/tests/` — 140 passed
+      (133 prior + 7 new).
+
+**Real measured numbers** (every imgsz vs iter-A baseline mAP=0.2155,
+arena=692,912 B, predicted P4 ms p50=5,820.51):
+
+| imgsz | mAP    | mAP delta | size      | arena (Δ%)  | P4 ms p50 (Δ%)  | P4 fps | verdict |
+|-------|--------|-----------|-----------|-------------|-----------------|--------|---------|
+| 192   | 0.0000 | -0.2155   | 3,220,672 | 532,144 -23%| 4,244.81 -27%   | 0.236  | regress |
+| 224   | 0.2155 | +0.0000   | 3,221,672 | 692,912  +0%| 5,796.17  -0.4% | 0.173  | equal   |
+| 256   | 0.2040 | -0.0115   | 3,222,664 | 878,256 +27%| 7,651.81 +31%   | 0.131  | regress |
+| 288   | 0.1983 | -0.0172   | 3,224,432 | 1,088,176+57%| 9,772.54 +68%  | 0.102  | regress |
+| 320   | 0.1995 | -0.0160   | 3,225,624 | 1,322,672+91%|12,062.99+107%  | 0.083  | regress |
+
+**Winner**: NONE. Recommendation in iter-B_summary.md: stay at iter-A's
+imgsz=224. Input resolution is not the right efficiency lever for THIS
+checkpoint (which was trained at 224); iter-E's width=0.75x retrain or
+a future smaller-crop retrain story is the right path.
+
+**Learnings**:
+- The imgsz=192 mAP=0 result is striking but expected: YOLOv8 trained at
+  224 has Detect-head receptive-field math that doesn't gracefully scale
+  to 192-pixel crops. The cls collapse from US-004 (per-tensor output
+  quant) is NOT what's happening here — the float32-output dequant from
+  iter-A is still in place; the cls activations themselves are simply
+  bad at this resolution. Probing this with --confidence-threshold=0.05
+  on an offline run might recover non-zero predictions but doesn't fix
+  the underlying problem. Not worth chasing without retraining.
+- imgsz=256/288/320 lose ~1.2-1.7 mAP-points (small) but cost 27-91%
+  more arena. Predictably: arena scales with H*W*channels for the
+  intermediate feature maps, and CONV_2D total_us scales similarly.
+  The size_bytes is essentially flat across the sweep (~3.22 MB
+  +/- 5 KB) because input resolution doesn't change the weight count.
+- The Pareto thresholds (15%/20%/15%) are tight enough that even a
+  pure-positive imgsz move (no mAP loss, +27% arena win at 192) gets
+  vetoed because mAP has to hold first. That's the intended behavior —
+  v2's accuracy floor is non-negotiable.
+- The iter-A baseline reproduces almost exactly at imgsz=224
+  (mAP=0.2155 same; latency -0.42% / arena +0% / size +0.02%).
+  This is a useful sanity check that the sweep pipeline is
+  byte-equivalent to the iter-A standalone export — any iteration
+  that re-runs the iter-A model at imgsz=224 should land within
+  ~0.5% on every axis.
+- The aggregator's `load_rollups` glob pattern (`iter-B_imgsz_*.json`)
+  picks up sidecar JSONs from the eval / bench steps. Filter on
+  `"imgsz" in d and "candidate_metrics" in d` to keep only the rollup
+  shape. Codified as a top-level pattern so iter-C/E aggregators don't
+  re-hit this trap.
+- `firmware/edge-bench/` has a hyphen so it's not a valid Python
+  package — the existing test `test_tflm_bench_parser.py` works
+  around this with `sys.path.insert(0, str(_BENCH_DIR))`. The sweep's
+  `_default_bench_fn` mirrors that pattern at module import time,
+  not on first call, so both behaviors and the test's stub-replacement
+  work identically.
+
+---
+
+## 2026-04-28 — iter-C: Structured channel pruning of distilled student
+
+**Status**: PASSED (Pareto verdict: regress)
+**Files changed**:
+- training/edge/yolo/prune_channels.py — `prune_l2_channels` (L2-norm
+  output-channel structured prune, head-excluded by `Detect`/`DFL` class
+  match) + `_default_trainer_fn` (prune in-place THEN ultralytics 1-epoch
+  finetune, single call) + `run_pipeline` (full prune→quant→eval→bench
+  orchestrator with per-stage failure isolation; mirrors the iter-B
+  sweep contract). Module-level DI seams: yolo_factory, pruner_fn,
+  trainer_fn, quantize_fn, eval_fn, bench_fn, baseline_loader.
+- training/edge/tests/test_prune_channels.py — 9 tests (18 with
+  parametrize expansion). Required AC tests: (1) sparsity reduction
+  matches 0.25 target on a real torch.nn.Conv2d module, (2) the Detect
+  head is excluded from pruning when exclude_head=True, (3) the
+  pipeline calls quantize AFTER trainer (load-bearing ordering check).
+  Plus blocked-path tests + schema validation + DI-on-mocked-nn tests.
+- training/edge/results/iter-C.md — full report with prune_summary
+  table, fp32-vs-int8 mAP diagnosis, Pareto verdict explanation, and
+  reproduce sequence.
+- training/edge/results/iter-C_pruned.json — main rollup deliverable.
+  status=passed; verdict=regress; mAP candidate=0.0 vs iter-A 0.2155;
+  size 3.22 MB (-0.005%); arena 692,784 B (-0.018%); P4 latency 5,855 ms
+  (+0.6%); prune_summary embedded with module-by-module breakdown.
+- training/edge/results/iter-C_eval.json — eval-harness sidecar.
+- training/edge/results/iter-C_bench-tflm.json — TFLM bench sidecar.
+- .gitignore — `training/edge/models/yolov8n_cat_pruned.pt` (intermediate;
+  same pattern as `yolov8n_cat_qat.pt`).
+
+**Acceptance criteria verified**:
+- [x] `prune_l2_channels(model, sparsity=0.25, exclude_head=True)`
+  exists and uses `torch.nn.utils.prune.LnStructured` (verified by
+  `test_prune_l2_channels_reduces_params_by_target_sparsity`).
+- [x] CLI: `python -m training.edge.yolo.prune_channels --model ...
+  --sparsity 0.25 --finetune-epochs 1 --data ... --out ...` runs
+  prune+finetune via ultralytics .train() with single_cls=True,
+  imgsz=224, lr0=1e-4 (matches US-003 finetune signature).
+- [x] Re-quantizes via `per_channel_quant.export_per_channel_int8` ->
+  `training/edge/models/yolov8n_cat_pruned_int8_pc.tflite` (test
+  `test_pipeline_invokes_quantize_after_trainer` enforces ordering).
+- [x] Eval + edge-bench, emit
+  `training/edge/results/iter-C_pruned.json` with full Pareto-verdict
+  shape vs iter-A frontier (story_id, title, status, blocked_reason,
+  model_path, p4_multiplier, prune_summary, eval, tflm, pareto,
+  candidate_metrics, baseline_metrics — all 12 keys checked).
+- [x] `iter-C.md`: sparsity achieved (25.00%, 562,668/2,250,672
+  zeroed), mAP delta vs iter-A (-0.2155), latency/arena delta (+0.6%
+  / -0.018%), Pareto verdict (regress).
+- [x] `test_prune_channels.py` covers (a) sparsity match, (b) head
+  exclusion (`test_prune_l2_channels_skips_the_head_when_exclude_head_true`),
+  (c) CLI calls quantize after finetune.
+- [x] If finetune fails -> status='blocked' (verified by
+  `test_pipeline_blocks_when_finetune_fails`); JSON IS still written.
+- [x] git diff main -- server/ is empty.
+- [x] pytest -p no:asyncio training/edge/tests/ — 158 passed.
+
+**Real measured numbers (iter-C)**:
+  prune_summary: target=0.25, achieved=0.2500 (562,668/2,250,672 weights
+  zeroed, 45 conv layers pruned, 19 head/DFL conv layers skipped).
+  Pruned .pt fp32 mAP@0.5 (ultralytics validator) = 0.706.
+  INT8 .tflite mAP@0.5 (eval harness) = 0.000 (val=120 imgs, conf=0.25).
+  size_bytes 3,220,832 (delta -168 vs iter-A 3,221,000; -0.005%).
+  arena_used_bytes 692,784 (delta -128 vs 692,912; -0.018%).
+  raw_x86_us_p50 1,171,088 (delta +6,986; +0.60%).
+  predicted_p4_latency_ms_p50 5,855.44 (P4 multiplier=5.0).
+  predicted_p4_fps 0.171.
+  tflm_compatible=true; same 16-op breakdown as iter-A (CONV_2D 92.45%
+  / LOGISTIC 6.66% / others <1%); zero unsupported ops.
+
+**Learnings**:
+- Soft prune doesn't shrink the .tflite — flatbuffer compresses zero-
+  weight channels but the per-channel-weight-scale tables and metadata
+  don't shrink, so size and arena are unchanged. To realize size
+  benefit you need a HARD slice that physically removes the channels
+  AND re-shapes consumer layers' input channels. That's a Detect-head
+  re-init story (out of scope here; candidate for a future iter).
+- Finetune-only (no KD signal) erodes the v1 KD-shaped cls magnitudes
+  the iter-A PTQ depended on. The pruned-and-finetuned `.pt` retains
+  fp32 mAP=0.706 but the cls activation distribution shifts — by the
+  time the per-tensor activation quantizer sees the head output the
+  cls bucket is again dominated by xywh, which is the same failure
+  mode v1 documented in "YOLOv8 PTQ + per-tensor output quant
+  collapses cls head". Float-output dequant (iter-A's fix) only
+  preserves precision that survived the per-tensor activation scale —
+  it cannot recover precision that the head's cls logits never had to
+  begin with.
+- The natural mitigation is to re-introduce KD into the iter-C
+  finetune (prune the iter-A *student* and re-distill from yolov8s for
+  the 1 epoch). That's a reasonable follow-on but exceeds iter-C's
+  scope; documented in iter-C.md and flagged for iter-H deprecation
+  list.
+- ultralytics' `device='auto'` literal STRING is rejected when no CUDA
+  is available (`select_device` raises ValueError). Pass `device=''`
+  (empty string) for true auto-detection or `device='cpu'` to force
+  CPU. The PoC's existing US-003 / US-006 scripts use `device='auto'`
+  and have so far run on a CUDA-equipped workstation; this iteration
+  hit the failure on a CUDA-less host. Codified as a CLI flag.
+- Ultralytics' `img2label_paths` correctly resolves the flat
+  `<stem>.{jpg,txt}` US-002 dataset layout — no need to reorganize
+  into images/ and labels/ subdirs even when running CPU-only.
+- The ROI of soft pruning at this sparsity (25 %) for this checkpoint
+  (~3 M params, small enough that flatbuffer overhead dominates) is
+  approximately zero on every Pareto axis. Hard-prune + Detect-head
+  re-init is the only path to real gains; the v2 frontier should not
+  pursue soft-prune-only work without that combined treatment.
+
+---
+
+## 2026-04-28 — iter-D: Mixed INT8/INT16 quantization (INT8 weights + INT16 activations)
+
+**Status**: PASSED (Pareto verdict: `equal` under v2 thresholds; mAP gain
++0.273 absolute is the largest single-iteration accuracy lift in the
+v2 loop so far, but no efficiency axis improves past threshold AND
+arena regresses 88.7%, so iter-A remains the v2 LATENCY/ARENA
+frontier while iter-D becomes the v2 ACCURACY frontier.)
+
+**Files changed**:
+- training/edge/yolo/mixed_int_quant.py — module + CLI; mirrors iter-A's
+  per_channel_quant.py shape (DI seams on every stage). Single converter
+  knob delta: `supported_ops=[EXPERIMENTAL_TFLITE_BUILTINS_ACTIVATIONS_INT16_WEIGHTS_INT8]`
+  + float32 IO (kept iter-A's float-output dequant; promoted input to
+  float32 too for tflite_adapter compat without a new dtype branch).
+- training/edge/tests/test_mixed_int_quant.py — 4 mocked unit tests:
+  INT16x8 supported_ops + float IO; calibration_loader `is`-identity vs
+  export_quantize AND per_channel_quant; full DI chain; CLI blocked-
+  fallback writes a well-formed .export.json sidecar even on raised
+  exceptions (so iter-H aggregator can still render a "blocked" row).
+- training/edge/results/aggregate_iter_d.py — combines eval + TFLM bench
+  JSONs with `build_pareto_verdict`; baseline pulled from
+  `iter-A_per_channel_quant.candidate_metrics` (per progress.txt
+  pattern "baseline_metrics uses iter-A's candidate_metrics").
+- training/edge/results/iter-D.json — eval (mAP=0.4885, p50=112.69 ms;
+  p50 latency is XNNPACK-related, see Learnings).
+- training/edge/results/iter-D-tflm.json — TFLM x86 bench
+  (arena=1,307,552 B, x86_p50=1,096,152 us, tflm_compatible=true).
+- training/edge/results/iter-D_mixed_int.json — final aggregate with
+  pareto.verdict='equal', deltas {mAP:+0.2731, size:+2.41%,
+  arena:+88.70%, latency:-5.84%}.
+- training/edge/results/iter-D.md — short report covering chosen path
+  (path 1 — INT16x8 builtin, path 2 deferred), numbers table, verdict
+  reasoning, TFLM compat note, files list, reproduce.
+- training/edge/eval/adapters/tflite_adapter.py — small extension: input
+  dtype branch keys off `input_details[0]['dtype']` only (verified
+  iter-A mAP unchanged at 0.215478).
+- training/edge/models/yolov8n_cat_distilled_int8w_int16a.tflite —
+  3.30 MB (gitignored per existing models/* rule; regenerable from
+  the CLI in iter-D.md "Reproduce").
+
+**Acceptance criteria verified**:
+- [x] training/edge/yolo/mixed_int_quant.py produces a .tflite where
+  internal activations are INT16 + weights are INT8 (path 1; path 2
+  deferred per PRD technical-notes guidance).
+- [x] Fallback path: CLI emits well-formed `.export.json` with
+  `blocked_reason` even when the heavy quantize step raises (test 4
+  covers this; the actual run did NOT block — TFLM compat held).
+- [x] training/edge/results/iter-D_mixed_int.json with Pareto verdict
+  vs iter-A frontier — verdict='equal'.
+- [x] training/edge/results/iter-D.md with chosen path documented
+  (path 1 — INT16x8 builtin) + before/after table + verdict
+  reasoning.
+- [x] training/edge/tests/test_mixed_int_quant.py — 4 mocked tests
+  (>=2 required); all pass.
+- [x] git diff main -- server/ is empty (0 lines).
+- [x] CatDetector import smoke test passes.
+- [x] pytest -p no:asyncio training/edge/tests/ — 162 passed (was
+  158; +4 new from test_mixed_int_quant.py).
+
+**Learnings**:
+- INT16 activations + INT8 weights via TF's
+  `EXPERIMENTAL_TFLITE_BUILTINS_ACTIVATIONS_INT16_WEIGHTS_INT8` is a
+  single-knob change on top of iter-A's pipeline. The PRD's worry
+  about TFLM op coverage did NOT materialize — every op the converter
+  emits has a TFLM implementation registered. `tflm_compatible=true`,
+  `allocate_tensors_status=ok`. CONV_2D shifts from 92.5% to 98.83%
+  of inference time (INT16 raises CONV_2D's compute cost more than
+  proportionally vs lighter ops); this is internal and doesn't affect
+  compat.
+- The eval-harness host-CPU latency reading (112.69 ms) is misleading.
+  TFLite's XNNPACK delegate has been added to the Python interpreter
+  by default since 2.13 and accelerates INT8 paths but NOT INT16
+  activations, so the eval falls back to reference ops. The TFLM x86
+  bench (which never uses XNNPACK) shows iter-D actually marginally
+  FASTER than iter-A (-5.84% on raw_x86_us_p50). For predicted P4
+  numbers, trust the TFLM bench.
+- The PRD asked for "backbone INT8 + head INT16" specifically. We
+  delivered "everything INT16 activations + INT8 weights" (path 1)
+  because TF 2.17 has no per-op dtype override at converter time.
+  Path (2) — split-export and link two .tflites — requires ONNX
+  surgery on `ultralytics.nn.modules.head.Detect` and a two-binary
+  firmware loader, which is firmware territory. Documented in the
+  iter-D.md "Chosen path" section so iter-H's recommendation can
+  reflect this honestly.
+- Adapter tweak: `tflite_adapter._preprocess` used to OR the
+  `is_int8` flag with the actual model dtype. iter-D's float-IO model
+  hit the OR-true branch and crashed the interpreter with a dtype
+  mismatch. Tightened to respect `input_details[0]['dtype']` only —
+  iter-A regression test confirmed mAP unchanged to 6 decimal places.
+  Future formats with float-or-int16 IO get adapter-compat for free.
+- Pareto verdict `equal` is correct per `build_pareto_verdict` rules
+  (mAP held + no efficiency axis past threshold), but it understates
+  iter-D's value. The user's promotion rule excludes iter-D from
+  becoming the latency/arena frontier (no efficiency axis improved
+  past 15%/20% thresholds AND arena regressed +88.70%), but iter-D IS
+  the v2 accuracy frontier (+0.273 absolute mAP over iter-A — the
+  largest single-iteration lift). iter-H's decision matrix must show
+  both frontiers — they're at different Pareto points along the
+  accuracy/arena axes.
+- Decision implication for iter-H: ESP32-P4 has 32 MB PSRAM (PRD
+  context), so iter-D's 1.31 MB arena fits with 30+ MB of headroom.
+  When accuracy matters more than concurrent-model arena pressure,
+  iter-D wins. When arena pressure dominates (multi-model concurrent
+  inference, shared image-buffer constraints), iter-A wins. The
+  iter-H recommendation paragraph must surface this trade-off.
+
+---
+
+## 2026-04-28 — iter-E: YOLOv8n width=0.75x retrain + KD distill + per-channel quant
+
+**Status**: PASSED (Pareto verdict: `regress` — efficiency wins big, mAP
+collapsed at PTQ. iter-A remains the accuracy floor; iter-D remains the
+v2 accuracy frontier; iter-E is the v2 efficiency frontier on raw
+size/latency numbers but is NOT promoted because the v2 rule requires
+mAP to hold first.)
+
+**Files changed**:
+- training/edge/yolo/configs/yolov8n_0p75x.yaml — yolov8 yaml shape, the
+  effective `width_multiple=0.1875` is stamped at run time by
+  `regenerate_config()` (composes user-facing 0.75 with yolov8n's 0.25).
+- training/edge/yolo/train_yolov8n_0p75x_cat.py — pipeline orchestrator:
+  `regenerate_config` -> `partial_load_yolov8n_weights` (slice donor
+  channels to fit the narrower student; falls back to random init if
+  donor missing) -> `_default_distill_train_fn` (registers
+  `patch_student_loss_for_distill` on `on_train_start` so the LIVE
+  student instance gets KD without a .pt round-trip) -> per_channel_quant
+  -> eval -> bench. Per-stage failure isolation; rollup JSON always
+  written (even when blocked).
+- training/edge/tests/test_yolov8n_0p75x.py — 8 mocked tests (>=2
+  required): width_multiple=0.75 reaches the trainer kwargs intact;
+  trainer -> quantize -> eval -> bench order is enforced; quantize
+  failure becomes status=blocked + JSON written; retrain failure
+  becomes status=blocked + JSON written; partial_load falls back to
+  random_init when donor missing; rollup carries iter-H ingestion
+  schema; Pareto verdict baseline is iter-A's candidate_metrics.
+- training/edge/models/yolov8n_0p75x_cat_distilled.pt (gitignored) —
+  fp32 distilled checkpoint, 3.8 MB.
+- training/edge/models/yolov8n_0p75x_cat_distilled_int8_pc.tflite
+  (gitignored) — INT8 PTQ via per-channel-friendly converter, 1.98 MB.
+- training/edge/results/iter-E_yolov8n_0p75x.json — main rollup (passed
+  status, regress verdict, full Pareto deltas).
+- training/edge/results/iter-E_eval.json — eval-harness sidecar.
+- training/edge/results/iter-E_bench-tflm.json — TFLM bench sidecar.
+- training/edge/results/iter-E.md — full report (numbers table, fp32
+  reference, TFLM op breakdown, cls-collapse diagnosis citing v1 +
+  iter-A + iter-C + iter-D, three known fixes, promotion decision).
+- .gitignore — `training/edge/models/yolov8n_0p75x_cat_distilled.pt`
+  added (intermediate, regenerable from CLI; same pattern as iter-C's
+  pruned .pt and US-005's QAT .pt).
+
+**Acceptance criteria verified**:
+- [x] training/edge/yolo/train_yolov8n_0p75x_cat.py builds a YOLOv8n
+      config with width_multiple=0.75 (user-facing) -> 0.1875 effective,
+      depth_multiple=1.0 (kept), trains cat-only on
+      training/edge/data/labeled/data.yaml at imgsz=224 (iter-B winner),
+      single_cls=True, batch=32, lr=1e-4 from yolov8n.pt initial weights
+      via slice-to-fit `partial_load_yolov8n_weights` (or random-init
+      fallback when donor missing).
+- [x] Distill step re-uses `patch_student_loss_for_distill` from
+      `training.edge.yolo.distill_train` (the load-bearing helper inside
+      `train_distilled`); alpha=0.5 + temperature=4.0 match US-006
+      exactly. Documented deviation in iter-E.md "Distill-step deviation":
+      the wrapper does NOT round-trip through `train_distilled`'s `.pt`
+      path because YAML-built models have no populated `self.ckpt`; we
+      apply the same KD loss patch on the live student instance via
+      `on_train_start` callback.
+- [x] Quantize via `training.edge.yolo.per_channel_quant.export_per_channel_int8`
+      — IDENTICAL pipeline to iter-A, byte-identical converter knobs
+      (verified by `_default_quantize_fn` directly calling that function).
+- [x] Eval + edge-bench ran; `training/edge/results/iter-E_yolov8n_0p75x.json`
+      written with full Pareto-verdict shape vs iter-A frontier
+      (`story_id`, `title`, `status`, `blocked_reason`, `model_path`,
+      `p4_multiplier`, `p4_multiplier_source`, `width_multiple`,
+      `depth_multiple`, `init_summary`, `eval`, `tflm`, `pareto`,
+      `candidate_metrics`, `baseline_metrics` — all 14 keys present).
+- [x] training/edge/results/iter-E.md comparison table (rows iter-A vs
+      iter-E for mAP / size / arena / latency / fps / host int8 latency /
+      tflm_compatible).
+- [x] training/edge/tests/test_yolov8n_0p75x.py — 8 mocked tests (>=2
+      required); two REQUIRED-by-AC tests:
+      `test_pipeline_passes_width_multiple_0p75_to_trainer` (width=0.75
+      reaches trainer kwargs unchanged) and
+      `test_pipeline_calls_distill_then_quantize_then_eval_then_bench`
+      (the distill/quant pipeline IS called end-to-end).
+- [x] Failure isolation per AC ("If retrain fails ... record
+      status='blocked' with concrete reason; emit JSON anyway"): both
+      `test_pipeline_writes_blocked_json_when_retrain_fails` and
+      `test_pipeline_writes_blocked_json_when_quantize_fails` enforce
+      the contract; the JSON IS written even when the heavy step raises.
+- [x] git diff main -- server/ is empty (0 lines).
+- [x] CatDetector import smoke test passes.
+- [x] pytest -p no:asyncio training/edge/tests/ — 170 passed
+      (was 162 + 8 new). 0 failures, 0 regressions.
+
+**Real measured numbers (iter-E vs iter-A baseline, P4 multiplier=5.0)**:
+
+| metric                       | iter-A (baseline) | iter-E         | delta            |
+|------------------------------|-------------------|----------------|------------------|
+| mAP@0.5 (eval harness)       | 0.2155            | 0.0000         | -0.2155 regress  |
+| size_bytes                   | 3,221,000         | 1,977,944      | -38.59% past 20% |
+| arena_used_bytes             | 692,912           | 683,312        | -1.39%           |
+| predicted P4 latency p50     | 5,820.51 ms       | 3,804.66 ms    | -34.63% past 15% |
+| predicted P4 fps             | 0.172             | 0.263          | +52.92%          |
+| host int8 latency p50 (eval) | ~3 ms             | 2.75 ms        | -8.4%            |
+| tflm_compatible              | true              | true           | held             |
+
+  fp32 distilled mAP@0.5 (ultralytics-internal validator) = 0.995
+  (saturated — same as US-006 distilled fp32 = 1.000 on this val).
+  Wall-clock: 50 epochs in 0.021 hours (~75 s) on a single RTX 4090.
+  init_summary: 355/355 keys loaded by slicing donor channels to the
+  narrower student shape — zero random-init params, zero shape mismatches.
+  TFLM op breakdown: CONV_2D 90.58%, LOGISTIC 7.21%, MUL 1.07%,
+  MAX_POOL_2D 0.71%, others <1%; same 16-op family as iter-A.
+
+**Learnings**:
+- Confirmed (third independent v2 finding): YOLOv8 PTQ + per-tensor
+  activation quant collapses cls UNLESS the student's pre-quant cls
+  magnitudes are large enough. iter-A's KD distillation at full yolov8n
+  width gave just enough cls signal to recover ~0.215 mAP; at the
+  narrower 0.1875 effective width (~57% of yolov8n params) the cls
+  signal is too weak even with the same KD recipe. The fp32 .pt is
+  healthy (mAP@0.5 = 0.995) — the failure is purely in the quantizer.
+- Three known fixes (cited in iter-E.md "Why mAP collapsed"):
+  (1) Detect-head split — ONNX surgery, out of scope; (2) iter-D's
+  INT16x8 builtin — already proven on this val (iter-D mAP 0.488 vs
+  iter-A 0.215). Stacking iter-D's INT16x8 onto iter-E's narrower
+  student is the highest-priority follow-on; (3) more aggressive KD —
+  not pursued because iter-A used the recommended alpha=0.5.
+- Built a sliceable partial-loader: `partial_load_yolov8n_weights` walks
+  the donor's state_dict, matches keys to the student, and slices each
+  donor tensor to the student's smaller shape along the leading channel
+  axis. Returns a `summary` dict with `loaded_keys / matched_keys_total
+  / skipped_missing / skipped_mismatched / fallback_random_init` so
+  iter-H can audit how much of the init is real-vs-random. On this
+  worktree: 355/355 successful — the 0.1875 student's tensors are
+  smaller than yolov8n's on every conv layer.
+- Distill-step deviation worth codifying: `train_distilled` (US-006)
+  takes a `student_pt: Path`, but YAML-built models have no populated
+  `self.ckpt` so `student.save()` cannot round-trip the partial-loaded
+  weights. iter-E's `_default_distill_train_fn` works around this by
+  building a teacher YOLO instance + registering
+  `patch_student_loss_for_distill` on the LIVE student via
+  `on_train_start`. Same callback pattern US-006 uses, just minus the
+  .pt round-trip. Future iterations that build students from YAML +
+  partial-load + KD-distill should follow this pattern.
+- The user-facing `width_multiple=0.75` is composed with yolov8n's
+  base 0.25 to stamp `width_multiple=0.1875` into the yaml (ultralytics
+  reads the yaml's value as a fraction of YOLOv8 BASE channel widths,
+  not yolov8n's). The two spaces are distinguished: the rollup JSON's
+  `width_multiple` field surfaces the user-facing 0.75; the yaml on
+  disk carries 0.1875. `test_regenerate_config_composes_with_yolov8n_base`
+  enforces the composition. Document this clearly in any iter-H
+  decision matrix that surfaces width_multiple — readers will assume
+  "0.75x of yolov8n", not "0.1875x of YOLOv8 base".
+- 1.98 MB INT8 .tflite is the smallest YOLOv8 .tflite this PoC has
+  produced — 38.6% smaller than iter-A's 3.22 MB. If the cls-collapse
+  is fixed (via iter-D-style INT16 activation stacking, or
+  Detect-head split), this becomes a strong P4-rollout candidate
+  because the predicted P4 latency is also -34.6%. The fp32 .pt is
+  already a meaningful artifact for any flow that doesn't need INT8
+  (e.g. P4 with float TFLM kernels — slower but accurate).
+- Existing iter-C / iter-D / iter-A PTQ pipelines all share
+  `per_channel_quant.export_per_channel_int8` — the iter-E pipeline
+  reusing it without modification means any future improvement to the
+  quantizer (e.g. a Detect-head splitter inserted into onnx2tf's
+  rewrite hooks) automatically benefits iter-A through iter-E.
+
+---
+
+
+## 2026-04-28 — iter-F: NanoDet revisit with per-channel quant
+
+**Status**: PASSED (Pareto: vs US-009 = `equal`, vs iter-A = `regress`)
+**Files added**:
+- `training/edge/nanodet/per_channel_quant.py` — thin wrapper reusing iter-A's
+  `quantize_to_int8_float_output_tflite` from
+  `training.edge.yolo.per_channel_quant`. Re-exports `calibration_loader` from
+  `training.edge.yolo.export_quantize` (load-bearing identity per the
+  `is`-identity contract). CLI matches iter-A shape; `--onnx` flag short-
+  circuits the .pth->ONNX step so the pipeline runs in the main env.
+- `training/edge/tests/test_nanodet_per_channel.py` — 5 mocked DI tests
+  including the load-bearing `nanodet.calibration_loader is yolo.calibration_loader`
+  assertion and the iter-F delta (`inference_output_type=tf.float32`).
+- `training/edge/results/aggregate_iter_f.py` — dual-baseline aggregator
+  emitting Pareto verdicts vs BOTH US-009 (same-architecture) and iter-A
+  (cross-architecture). New convenience-layout shape: a single
+  iter-F_nanodet_per_channel.json with `pareto_vs_nanodet` +
+  `pareto_vs_yolo_v2_frontier` keys.
+- `training/edge/results/iter-F{,_nanodet_per_channel,-tflm}.{json,md}`.
+- `training/edge/nanodet/checkpoints/nanodet-plus-m_416.onnx` (gitignored,
+  regenerable from the upstream URL with sha256 in `checkpoints/SHA256SUMS`).
+- `training/edge/models/nanodet_cat_0.5x_224_int8_pc.tflite` (gitignored,
+  1.61 MB INT8 with float32 output dtype).
+
+**Acceptance criteria verified**:
+- [x] `training/edge/nanodet/per_channel_quant.py` thin wrapper that flips
+      `inference_output_type=tf.float32` (verified by
+      test_quantizer_uses_float32_output_dtype_via_iter_a_path) and re-uses
+      the same `calibration_loader` identity (verified by
+      test_calibration_loader_is_shared_with_yolo_export_quantize).
+- [x] CLI matches the spec: `--onnx`, `--calib-dir`, `--out`, `--imgsz`.
+- [x] iter-F_nanodet_per_channel.json emitted with Pareto verdict vs US-009
+      AND vs iter-A (v2 YOLOv8n frontier). Both verdicts present in the JSON.
+- [x] iter-F.md with comparison + the 0.5x deviation acknowledgement
+      (model is upstream 1.0x at 416 because no 0.5x .pth was upstream-
+      published; same v1 US-007/US-008 deviation chain).
+- [x] 5 tests (>= the required 2). 175/175 edge tests pass.
+- [x] `git diff main -- server/` empty.
+- [x] CatDetector import smoke test passes.
+
+**Real measured numbers**:
+- mAP@0.5 = 0.000 (vs US-009's 0.000; vs iter-A's 0.215)
+- size = 1,613,232 B (-49.9% vs iter-A; +0.01% vs US-009)
+- arena_used = 2,253,888 B (+225.3% vs iter-A; +0.00% vs US-009)
+- raw x86 p50 = 1,788,134 us (-2.5% vs US-009; +53.6% vs iter-A)
+- predicted P4 p50 (mult=5.0) = 8,940.67 ms (0.112 fps)
+- output dtype: float32 (the iter-F delta) vs US-009's int8
+
+**Learnings**:
+
+- The float-output dequant fix that recovered YOLOv8's cls collapse (iter-A:
+  mAP 0->0.215) is **insufficient** for NanoDet-Plus. Diagnostic at
+  conf=0.05 reveals every prior anchor predicts the SAME bbox
+  `[0.015, 0.000, 1.000, 0.996]` — meaning the reg-DFL distance bins
+  collapsed under per-tensor activation quant on the head's INT8 conv
+  pathway, UPSTREAM of the float-output dequant. The float dequant only
+  preserves precision in the head's last tensor, not through the conv
+  layers feeding it.
+
+- This is the inverse of the iter-A finding: YOLOv8 KD-distilled
+  weights had calibrated cls magnitudes such that the head's last-int8
+  tensor preserved enough cls signal for the dequant to recover. NanoDet
+  ships pretrained on COCO (no cat-only KD shaping) AND its head emits
+  cls already-sigmoided alongside unbounded reg-DFL logits, so a per-
+  tensor activation scale on the head's conv outputs gets dominated by
+  reg-DFL and quantizes cls into a near-zero bucket BEFORE we get to
+  dequantize.
+
+- Codebase pattern: when a new architecture lands in this PoC, predict
+  whether the iter-A trick (`inference_output_type=tf.float32`) will
+  recover PTQ collapse by asking: does the head's LAST-int8 tensor
+  carry enough cls signal to be worth dequantizing? If the answer is
+  "no, the cls is already crushed by upstream activation quant", you
+  need head-split ONNX surgery or fp16 fallback. Don't burn a
+  full iter-* slot on float-output dequant alone for such architectures.
+
+- iter-F costs zero promotion ROI (verdict=`equal` vs same-arch
+  baseline; `regress` vs cross-arch frontier) but produces THREE useful
+  artifacts: (1) the file `training/edge/nanodet/per_channel_quant.py`
+  is a complete reusable wrapper that any future NanoDet variant
+  (genuine 0.5x cat .pth via US-008's venv, or fp16 fallback experiment)
+  can re-target with a single CLI flag change; (2) the
+  `aggregate_iter_f.py` dual-baseline pattern is reusable for any
+  future cross-architecture iter-* candidate; (3) the dual-baseline
+  JSON shape (`pareto_vs_*` keys) is now a documented seam iter-H's
+  SUMMARY_v2 will ingest.
+
+- ONNX is fixed at 416×416 (not dynamic). Calibration must use
+  `--imgsz 416` not 224. Documented in iter-F.md.
+
+- Codebase pattern (re-affirmed): the `calibration_loader is`-identity
+  contract from US-009 + iter-A continues to hold across the
+  YOLO/NanoDet PTQ paths. The test
+  `test_calibration_loader_is_shared_with_yolo_export_quantize` enforces
+  it for iter-F too.
+
+---
+
+
+## 2026-04-28 — iter-G: NMS off-graph + decode optimization for inference-only latency
+
+**Status**: PASSED (verifier: `off_graph_confirmed`)
+**Files added**:
+- `training/edge/eval/decode_only.py` — off-graph YOLOv8 decode (mirrors
+  `onnx_adapter._decode_yolo_onnx`'s xywh/imgsz + max-cls + xyxy + clip
+  math) + greedy single-class IoU NMS + `verify_off_graph()` op-breakdown
+  scanner. `IN_GRAPH_NMS_OPS = {TFLite_Detection_PostProcess,
+  NON_MAX_SUPPRESSION_V4, NON_MAX_SUPPRESSION_V5, CombinedNonMaxSuppression}`
+  is the canonical "things that would block off-graph" set.
+- `training/edge/tests/test_decode_only.py` — 8 tests: parity vs
+  `_decode_yolo_onnx` on a fixed (1,5,8) raw tensor; NMS drops
+  overlapping boxes (3→2); decode+NMS round-trip equivalence;
+  shape-fallback returns []; verifier flags `TFLite_Detection_PostProcess`;
+  verifier passes for the real iter-A 16-op set; multi-offender dedup
+  (alphabetical); `IN_GRAPH_NMS_OPS` covers the four exporter outputs.
+- `training/edge/results/aggregate_iter_g.py` — combines runs=200
+  edge-bench JSON with `verify_off_graph` into the iteration's
+  `iter-G_off_graph_nms.json`. Records inference-only latency, drift vs
+  iter-A's runs=50 numbers, and the decode+NMS post-process budget.
+- `training/edge/results/write_iter_g_md.py` — renders `iter-G.md` from
+  the aggregator JSON. Mirrors `iter-A.md` / `iter-D.md` shape.
+- `training/edge/results/iter-G_offgraph-tflm.json` — raw runs=200
+  edge-bench output (`raw_x86_us_p50=1,156,898 us`, `arena_used=692,912 B`,
+  `tflm_compatible=true`, 16 ops with no NMS/Detect post-process op).
+- `training/edge/results/iter-G_off_graph_nms.json` — final aggregate.
+- `training/edge/results/iter-G.md` — full narrative + tables +
+  reproduce block.
+
+**Acceptance criteria verified**:
+- [x] `training/edge/eval/decode_only.py` is a standalone module that
+  takes `(1, num_outputs, num_anchors)` raw + `imgsz` and produces the
+  same `{bbox, confidence}` list as `tflite_adapter`. Math cited
+  against `onnx_adapter._decode_yolo_onnx` in the docstring + parity
+  test.
+- [x] Real edge-bench run on iter-A's tflite at `runs=200` produced
+  `op_breakdown` with zero NMS/Detect-PostProcess ops; `verify_off_graph`
+  returns `off_graph=True`. `iter-G_off_graph_nms.json:verifier.status =
+  off_graph_confirmed`. Inference-only latency captured.
+- [x] In-graph-NMS handling: aggregator reads the verifier verdict and
+  flips `status="blocked"` with the offending op listed if the verifier
+  fails. Test `test_verify_off_graph_flags_in_graph_nms_op` exercises it.
+  No real candidate triggered the path on this run — both iter-A and
+  iter-F tflites cleared.
+- [x] `iter-G.md` explains decode lives in firmware C on the P4 host CPU
+  (NOT in TFLM) and budgets the post-process cost: ~0.0154 ms estimated
+  vs ~5,785 ms inference (~0.0003%). Negligible.
+- [x] `test_decode_only.py` has 8 tests (>=3 required); the three
+  AC-required tests are: parity (a), NMS dedup (b), verifier flags
+  in-graph NMS (c).
+- [x] `git diff main -- server/` is empty (0 lines).
+- [x] `pytest -p no:asyncio training/edge/tests/` — 183 passed, 0 failed.
+
+**Real numbers (runs=200 vs iter-A's runs=50)**:
+
+| metric | iter-A runs=50 | iter-G runs=200 | drift |
+|---|---:|---:|---:|
+| raw x86 us p50 | 1,164,102 | 1,156,898 | -0.62% |
+| raw x86 us p95 | 1,190,556 | 1,190,409 | -0.01% |
+| predicted P4 ms p50 (×5.0) | 5,820.5 | 5,784.5 | -0.62% |
+| predicted P4 fps | 0.1718 | 0.1729 | +0.0011 |
+
+**Learnings**:
+- ALL onnx2tf-produced YOLOv8 .tflites in the v2 frontier so far emit
+  ZERO in-graph NMS / Detect-PostProcess ops. The op_breakdown sees
+  CONV_2D, LOGISTIC, ADD, MUL, PAD, MAX_POOL_2D, RESIZE_NEAREST_NEIGHBOR,
+  RESHAPE, TRANSPOSE, SPLIT, CONCATENATION, STRIDED_SLICE, SUB, SOFTMAX,
+  QUANTIZE, DEQUANTIZE — backbone + neck + Detect-head convs through
+  the per-channel int8 weight scales, ending at the single fp32
+  DEQUANTIZE on the `(1, 5, 1029)` output. Decode + NMS are stripped.
+  This is the upstream contract of `ultralytics.YOLO(...).export(format='onnx',
+  ...)` followed by `onnx2tf` — neither inserts post-processing into
+  the TFLite graph. Future iterations that introduce alternative
+  exporters (e.g. ultralytics' built-in `format='tflite'` path, or
+  TF's own `SavedModel -> TFLite` for a model with embedded NMS) MUST
+  re-run `verify_off_graph` because TFLite_Detection_PostProcess is a
+  real op in the schema and IS emitted by the SSD-style export path.
+- runs=50 vs runs=200 stability: drift on this hardware is sub-1% on
+  p50 and effectively zero on p95. The runs=50 numbers iter-A through
+  iter-F carry are tight enough that re-running them at 200 wouldn't
+  shift any Pareto verdict. iter-H can cite the runs=50 numbers
+  uniformly without bias concerns.
+- Post-process cost is so far below inference that we can ignore it
+  entirely in the v2 SUMMARY: ~15 µs decode + NMS vs ~5,785 ms
+  inference at the P4 multiplier. Even if the multiplier turns out
+  optimistic (real boards measure 8x not 5x), inference will dominate
+  by 5+ orders of magnitude. The `decode_only.py` reference is mostly
+  load-bearing for the firmware C port's correctness, not its budget.
+- The IN_GRAPH_NMS_OPS set is conservative — it lists the four op
+  names the TFLite schema uses for post-processing
+  (TFLite_Detection_PostProcess for SSD, NON_MAX_SUPPRESSION_V4/V5
+  for newer exporters, and TF's CombinedNonMaxSuppression which can
+  survive into a custom TFLite delegate). Anything else is treated as
+  "not NMS". If a future architecture ships post-processing under a
+  different op name, add it to this set; the test
+  `test_in_graph_nms_ops_set_covers_known_exporter_outputs` is a
+  regression bumper for that change.
+
+
+## 2026-04-28 — iter-H: Final synthesis SUMMARY_v2.md + ESP32-P4 rollout plan + deprecation list
+
+**Status**: PASSED
+**Files added**:
+- `training/edge/results/aggregate_summary_v2.py` — new; v2 ROW_SPECS-style
+  static row order (iter-A through iter-G with iter-B's 5-resolution sweep
+  expanded into 5 rows). Reads each iter-* primary JSON and the v1 US-*
+  EvalResults; emits SUMMARY_v2.md (sectioned: matrix, frontier members,
+  recommendation w/ MIPI-CSI + PSRAM + classifier handoff, deprecation,
+  missing inputs, regen instructions) + machine-readable v2_frontier.json
+  (frontier list, winner, deprecated_v1, all_iter_rows, missing).
+  Frontier picker exclusion rules: status != passed | tflm_compatible == False
+  | map50 == 0 (the cls-collapse signal). Sort: predicted_p4_fps desc, with
+  map50-desc + size-asc tie-breakers. pick_winner is intentionally a
+  separate sort (mAP-desc primary) — frontier is for *presentation*,
+  winner is for *deployment* and accuracy is the dominant criterion on
+  the catzap rare-positive rig.
+- `training/edge/results/SUMMARY_v2.md` — generated artifact. Re-run the
+  CLI to refresh.
+- `training/edge/results/v2_frontier.json` — generated machine-readable
+  shape for downstream tooling.
+- `training/edge/tests/test_summary_v2_aggregate.py` — 9 tests covering
+  all 4 PRD-required ACs plus iter-G's distinct extraction path (no
+  candidate_metrics; reads iter_a_baseline_metrics + inference_only_latency),
+  empty-frontier fallback, write_outputs both-files emission, and
+  missing-input reporting.
+
+**Acceptance criteria verified**:
+- [x] aggregate_summary_v2.py reads iter-*.json AND US-*.json, emits
+      SUMMARY_v2.md and v2_frontier.json — verified by running the CLI;
+      11 iter rows + 4 v1 rows ingested.
+- [x] SUMMARY_v2.md sections present: (1) v2 Pareto frontier table with
+      all 7 PRD-required columns (story, mAP, size_mb, arena_kb,
+      predicted_p4_latency_ms_p50, predicted_p4_fps, pareto_verdict),
+      (2) Recommendation paragraph picking ONE first-flash candidate
+      with concrete numbers, (3) ESP32-P4 rollout plan (PSRAM placement,
+      MIPI-CSI vs HTTP-stream, classifier handoff to
+      server/vision/classifier.py), (4) Deprecation list of v1 INT8
+      candidates the v2 frontier obsoletes — verified by
+      test_summary_v2_md_has_required_sections plus inspection.
+- [x] SUMMARY.md preserved (not overwritten) — verified by `git status
+      training/edge/results/SUMMARY.md` showing untracked-files for
+      SUMMARY_v2.md only and SUMMARY.md unmodified.
+- [x] test_summary_v2_aggregate.py covers all 4 AC clauses:
+      (a) test_frontier_picker_excludes_blocked_and_zero_mAP
+      (b) test_frontier_sorted_by_predicted_p4_fps_desc
+      (c) test_deprecation_list_includes_v1_INT8_candidates_dominated
+      (d) test_recommendation_addresses_mipi_csi_vs_http_stream
+- [x] PR creation deferred per global system guidance: do NOT push or
+      merge without the user's explicit ask. The plan is to push +
+      `gh pr create --draft` only after the user approves.
+- [x] git diff main -- server/ empty (0 lines).
+- [x] CatDetector import smoke test passes.
+- [x] pytest -p no:asyncio training/edge/tests/ — 192 passed, 0 failed
+      (was 183 + 9 new). server/tests/ has 5 pre-existing failures
+      (test_sweep_controller / test_tile_grid) which predate this work
+      and are NOT introduced by iter-H — re-confirmed by stashing the
+      diff and re-running.
+
+**Real winner (the iter-H decision matrix's pick)**:
+
+iter-D (INT8w/INT16a) — mAP@0.5 = 0.4885, predicted P4 latency p50
+~5481 ms (-5.8 % vs iter-A floor), predicted P4 fps ~0.182 (+6.2 % vs
+iter-A floor), TFLM arena 1.25 MB (in 32 MB P4 PSRAM, ~30.7 MB
+headroom). It also fits the 8 MB ESP32-S3 fallback ceiling, so the same
+.tflite is portable across both target boards. Dominates v1 US-006-int8
+(mAP 0.205) by +0.28 mAP — the v2 frontier deprecates ALL FOUR v1 INT8
+candidates (US-004/US-005/US-006-int8/US-009) on accuracy.
+
+**Frontier members (sorted by predicted_p4_fps desc)**:
+
+iter-D (mAP=0.488, fps=0.182) -> iter-G NMS off-graph (mAP=0.215,
+fps=0.173) -> iter-B@224 (mAP=0.215, fps=0.173) -> iter-A floor
+(mAP=0.215, fps=0.172) -> iter-B@256 (mAP=0.204, fps=0.131) ->
+iter-B@288 (mAP=0.198, fps=0.102) -> iter-B@320 (mAP=0.199, fps=0.083).
+
+**Excluded from frontier (and why, per iter-H exclusion rules)**:
+
+- iter-B@192: zero-mAP (cls collapse)
+- iter-C: zero-mAP (pruned student under per-tensor activation quant)
+- iter-E: zero-mAP (0.75x narrower student)
+- iter-F: zero-mAP (NanoDet per-channel — per-tensor activation quant
+  on the head's INT8 conv pathway is upstream of the float-output
+  dequant fix that recovered YOLOv8)
+
+**Learnings**:
+- The same exclusion rule (status==passed AND tflm_compatible AND
+  mAP@0.5 > 0) keeps the v2 frontier honest. Five of the eleven iter-*
+  candidates (4 + iter-D-blocked-fixture) collapsed to mAP=0 under
+  per-tensor activation quant — surfacing those in the matrix with
+  pareto_verdict=regress (and excluding them from the frontier list)
+  is more useful than silently dropping them. Future iterations
+  should keep this contract.
+- Frontier sort (fps desc) and winner pick (mAP desc) are two distinct
+  rankings. They diverge any time the highest-mAP row isn't the
+  fastest. Codifying them as separate functions with explicit docstrings
+  makes the SUMMARY's recommendation paragraph reproducible and
+  testable.
+- iter-G's JSON shape is intentionally different — same .tflite as
+  iter-A but a refreshed inference_only_latency. _extract_candidate
+  carries that as a third branch (alongside candidate_metrics and bare
+  EvalResult). When future iterations introduce new measurement-only
+  variants (e.g. fp16 fallback, profile-guided arena tuning), they
+  should follow this pattern: emit iter_a_baseline_metrics +
+  measurement_only_latency, not a synthetic candidate_metrics block.
+- The deprecation list test (test_deprecation_list_includes_v1_INT8_candidates_dominated)
+  enforces strict accuracy domination as the v1->v2 displacement rule.
+  Latency/size improvements alone don't trigger deprecation because
+  v1's frontier is implicitly the v2 floor (iter-A baseline). Codifying
+  this avoids accidentally deprecating a slower-but-more-accurate v1
+  candidate.
+- The recommendation paragraph weaves the four PRD-required clauses
+  (PSRAM, MIPI-CSI vs HTTP, classifier handoff, fps caveat) into one
+  narrative. A test that asserts each clause's keyword appears in the
+  output is a low-cost guardrail against future copy-edits silently
+  removing a section.
 
 ---

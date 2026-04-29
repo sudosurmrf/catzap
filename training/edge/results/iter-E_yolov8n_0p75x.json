@@ -1,0 +1,193 @@
+{
+  "story_id": "iter-E",
+  "title": "YOLOv8n width=0.75x retrain (depth=1.0) + KD distill from yolov8s + per-channel-friendly INT8 PTQ",
+  "status": "passed",
+  "blocked_reason": null,
+  "model_path": "training/edge/models/yolov8n_0p75x_cat_distilled_int8_pc.tflite",
+  "p4_multiplier": 5.0,
+  "p4_multiplier_source": "Conservative midpoint between scalar-reference (~6x x86) and vector-ext / dual-core ideal (~3x x86); v1 used 8.0 for ESP32-S3. Update once real ESP32-P4 measurements land.",
+  "width_multiple": 0.75,
+  "depth_multiple": 1.0,
+  "init_summary": {
+    "base_pt": "yolov8n.pt",
+    "matched_keys_total": 355,
+    "loaded_keys": 355,
+    "skipped_missing_in_student": 0,
+    "skipped_mismatched_shape": 0,
+    "fallback_random_init": false
+  },
+  "eval": {
+    "story_id": "iter-E_eval",
+    "model_path": "training/edge/models/yolov8n_0p75x_cat_distilled_int8_pc.tflite",
+    "model_format": "tflite_int8",
+    "map50": 0.0,
+    "size_bytes": 1977944,
+    "params": 6448503,
+    "flops": 0,
+    "input_hw": [
+      224,
+      224
+    ],
+    "latency_ms_p50": 2.7484464953886345,
+    "latency_ms_p95": 3.4476920613087714,
+    "val_images": 120,
+    "notes": ""
+  },
+  "tflm": {
+    "story_id": "iter-E_bench",
+    "model_path": "training/edge/models/yolov8n_0p75x_cat_distilled_int8_pc.tflite",
+    "model_size_bytes": 1977944,
+    "runs": 50,
+    "arena_size_bytes": 8388608,
+    "arena_used_bytes": 683312,
+    "input_bytes": 150528,
+    "output_bytes": 20580,
+    "schema_status": "ok",
+    "allocate_tensors_status": "ok",
+    "timed_invoke_status": "ok",
+    "profiler_overflowed": false,
+    "tflm_compatible": true,
+    "op_breakdown": [
+      {
+        "op_name": "ADD",
+        "count": 400,
+        "total_us": 29646,
+        "percent": 0.078
+      },
+      {
+        "op_name": "CONCATENATION",
+        "count": 950,
+        "total_us": 3032,
+        "percent": 0.008
+      },
+      {
+        "op_name": "CONV_2D",
+        "count": 3200,
+        "total_us": 34622670,
+        "percent": 90.583
+      },
+      {
+        "op_name": "DEQUANTIZE",
+        "count": 50,
+        "total_us": 132,
+        "percent": 0.0
+      },
+      {
+        "op_name": "LOGISTIC",
+        "count": 2900,
+        "total_us": 3148181,
+        "percent": 8.237
+      },
+      {
+        "op_name": "MAX_POOL_2D",
+        "count": 150,
+        "total_us": 19872,
+        "percent": 0.052
+      },
+      {
+        "op_name": "MUL",
+        "count": 2950,
+        "total_us": 202311,
+        "percent": 0.529
+      },
+      {
+        "op_name": "PAD",
+        "count": 350,
+        "total_us": 38043,
+        "percent": 0.1
+      },
+      {
+        "op_name": "QUANTIZE",
+        "count": 150,
+        "total_us": 4005,
+        "percent": 0.01
+      },
+      {
+        "op_name": "RESHAPE",
+        "count": 250,
+        "total_us": 284,
+        "percent": 0.001
+      },
+      {
+        "op_name": "RESIZE_NEAREST_NEIGHBOR",
+        "count": 100,
+        "total_us": 433,
+        "percent": 0.001
+      },
+      {
+        "op_name": "SOFTMAX",
+        "count": 50,
+        "total_us": 145005,
+        "percent": 0.379
+      },
+      {
+        "op_name": "SPLIT",
+        "count": 400,
+        "total_us": 3971,
+        "percent": 0.01
+      },
+      {
+        "op_name": "STRIDED_SLICE",
+        "count": 200,
+        "total_us": 254,
+        "percent": 0.001
+      },
+      {
+        "op_name": "SUB",
+        "count": 100,
+        "total_us": 1209,
+        "percent": 0.003
+      },
+      {
+        "op_name": "TRANSPOSE",
+        "count": 200,
+        "total_us": 2847,
+        "percent": 0.007
+      }
+    ],
+    "raw_x86_us_p50": 760932.0,
+    "raw_x86_us_p95": 785317.0,
+    "raw_x86_us_min": 751934.0,
+    "raw_x86_us_max": 788587.0,
+    "raw_x86_us_mean": 764532.0,
+    "x86_to_s3_multiplier": 8.0,
+    "predicted_s3_us_p50": 6087456.0,
+    "predicted_s3_us_p95": 6282536.0,
+    "predicted_s3_fps": 0.16427223457549425,
+    "binary": "/home/phetamine/.archon/workspaces/sudosurmrf/catzap/worktrees/archon/thread-5bcc925a/firmware/edge-bench/build/edgebench",
+    "tflm_commit": "51bee03bed4776f1de88dd87226ff8c260f88e3c"
+  },
+  "pareto": {
+    "verdict": "regress",
+    "baseline_story": "iter-A (per-channel-friendly INT8 PTQ; v2 accuracy floor)",
+    "baseline_map50": 0.2154782597952959,
+    "baseline_size_bytes": 3221000,
+    "baseline_arena_used_bytes": 692912,
+    "baseline_predicted_p4_latency_ms_p50": 5820.51,
+    "deltas": {
+      "map50": -0.2154782597952959,
+      "size_pct": -38.59223843526855,
+      "arena_pct": -1.3854573163691781,
+      "latency_pct": -34.63356303829046
+    },
+    "thresholds": {
+      "map_regress_tolerance": 0.0,
+      "latency_improve_pct": 15.0,
+      "size_improve_pct": 20.0,
+      "arena_improve_pct": 15.0
+    }
+  },
+  "candidate_metrics": {
+    "map50": 0.0,
+    "size_bytes": 1977944,
+    "arena_used_bytes": 683312,
+    "predicted_p4_latency_ms_p50": 3804.66,
+    "predicted_p4_fps": 0.2628355753207908
+  },
+  "baseline_metrics": {
+    "map50": 0.2154782597952959,
+    "size_bytes": 3221000,
+    "arena_used_bytes": 692912,
+    "predicted_p4_latency_ms_p50": 5820.51
+  }
+}

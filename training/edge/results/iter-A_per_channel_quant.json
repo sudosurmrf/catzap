@@ -1,0 +1,183 @@
+{
+  "story_id": "iter-A",
+  "title": "Per-channel output quantization fix: float32 OUTPUT dequant preserves cls precision through INT8 PTQ",
+  "status": "passed",
+  "blocked_reason": null,
+  "model_path": "training/edge/models/yolov8n_cat_distilled_int8_pc.tflite",
+  "p4_multiplier": 5.0,
+  "p4_multiplier_source": "Conservative midpoint between scalar-reference (~6x x86) and vector-ext / dual-core ideal (~3x x86); v1 used 8.0 for ESP32-S3. Update once real ESP32-P4 measurements land.",
+  "eval": {
+    "story_id": "iter-A",
+    "model_path": "training/edge/models/yolov8n_cat_distilled_int8_pc.tflite",
+    "model_format": "tflite_int8",
+    "map50": 0.2154782597952959,
+    "size_bytes": 3221000,
+    "params": 7881671,
+    "flops": 0,
+    "input_hw": [
+      224,
+      224
+    ],
+    "latency_ms_p50": 13.309822010342032,
+    "latency_ms_p95": 17.509244399843737,
+    "val_images": 120,
+    "notes": ""
+  },
+  "tflm": {
+    "story_id": "iter-A",
+    "model_path": "training/edge/models/yolov8n_cat_distilled_int8_pc.tflite",
+    "model_size_bytes": 3221000,
+    "runs": 50,
+    "arena_size_bytes": 8388608,
+    "arena_used_bytes": 692912,
+    "input_bytes": 150528,
+    "output_bytes": 20580,
+    "schema_status": "ok",
+    "allocate_tensors_status": "ok",
+    "timed_invoke_status": "ok",
+    "profiler_overflowed": false,
+    "tflm_compatible": true,
+    "op_breakdown": [
+      {
+        "op_name": "ADD",
+        "count": 400,
+        "total_us": 38943,
+        "percent": 0.067
+      },
+      {
+        "op_name": "CONCATENATION",
+        "count": 950,
+        "total_us": 3738,
+        "percent": 0.006
+      },
+      {
+        "op_name": "CONV_2D",
+        "count": 3200,
+        "total_us": 54012488,
+        "percent": 92.5
+      },
+      {
+        "op_name": "DEQUANTIZE",
+        "count": 50,
+        "total_us": 126,
+        "percent": 0.0
+      },
+      {
+        "op_name": "LOGISTIC",
+        "count": 2900,
+        "total_us": 3853839,
+        "percent": 6.6
+      },
+      {
+        "op_name": "MAX_POOL_2D",
+        "count": 150,
+        "total_us": 26227,
+        "percent": 0.045
+      },
+      {
+        "op_name": "MUL",
+        "count": 2950,
+        "total_us": 253136,
+        "percent": 0.434
+      },
+      {
+        "op_name": "PAD",
+        "count": 350,
+        "total_us": 42062,
+        "percent": 0.072
+      },
+      {
+        "op_name": "QUANTIZE",
+        "count": 150,
+        "total_us": 5302,
+        "percent": 0.009
+      },
+      {
+        "op_name": "RESHAPE",
+        "count": 250,
+        "total_us": 264,
+        "percent": 0.0
+      },
+      {
+        "op_name": "RESIZE_NEAREST_NEIGHBOR",
+        "count": 100,
+        "total_us": 615,
+        "percent": 0.001
+      },
+      {
+        "op_name": "SOFTMAX",
+        "count": 50,
+        "total_us": 145899,
+        "percent": 0.25
+      },
+      {
+        "op_name": "SPLIT",
+        "count": 400,
+        "total_us": 4860,
+        "percent": 0.008
+      },
+      {
+        "op_name": "STRIDED_SLICE",
+        "count": 200,
+        "total_us": 198,
+        "percent": 0.0
+      },
+      {
+        "op_name": "SUB",
+        "count": 100,
+        "total_us": 1215,
+        "percent": 0.002
+      },
+      {
+        "op_name": "TRANSPOSE",
+        "count": 200,
+        "total_us": 2953,
+        "percent": 0.005
+      }
+    ],
+    "raw_x86_us_p50": 1164102.0,
+    "raw_x86_us_p95": 1190556.0,
+    "raw_x86_us_min": 1151955.0,
+    "raw_x86_us_max": 1206108.0,
+    "raw_x86_us_mean": 1167968.0,
+    "x86_to_s3_multiplier": 8.0,
+    "predicted_s3_us_p50": 9312816.0,
+    "predicted_s3_us_p95": 9524448.0,
+    "predicted_s3_fps": 0.10737890665938209,
+    "binary": "/home/phetamine/.archon/workspaces/sudosurmrf/catzap/worktrees/archon/thread-5bcc925a/firmware/edge-bench/build/edgebench",
+    "tflm_commit": "51bee03bed4776f1de88dd87226ff8c260f88e3c"
+  },
+  "pareto": {
+    "verdict": "equal",
+    "baseline_story": "US-006-int8 (v1 KD distilled INT8 frontier)",
+    "baseline_map50": 0.20470688237296086,
+    "baseline_size_bytes": 3220840,
+    "baseline_arena_used_bytes": 692816,
+    "baseline_predicted_p4_latency_ms_p50": 5883.365,
+    "deltas": {
+      "map50": 0.010771377422335027,
+      "size_pct": 0.004967648191155102,
+      "arena_pct": 0.013856492921641532,
+      "latency_pct": -1.0683511901777225
+    },
+    "thresholds": {
+      "map_regress_tolerance": 0.0,
+      "latency_improve_pct": 15.0,
+      "size_improve_pct": 20.0,
+      "arena_improve_pct": 15.0
+    }
+  },
+  "candidate_metrics": {
+    "map50": 0.2154782597952959,
+    "size_bytes": 3221000,
+    "arena_used_bytes": 692912,
+    "predicted_p4_latency_ms_p50": 5820.51,
+    "predicted_p4_fps": 0.17180625065501132
+  },
+  "baseline_metrics": {
+    "map50": 0.20470688237296086,
+    "size_bytes": 3220840,
+    "arena_used_bytes": 692816,
+    "predicted_p4_latency_ms_p50": 5883.365
+  }
+}

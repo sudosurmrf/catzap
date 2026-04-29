@@ -1,0 +1,124 @@
+{
+  "story_id": "iter-B_imgsz_288_bench",
+  "model_path": "training/edge/models/sweep_imgsz/yolov8n_cat_distilled_int8_pc_288.tflite",
+  "model_size_bytes": 3224432,
+  "runs": 50,
+  "arena_size_bytes": 8388608,
+  "arena_used_bytes": 1088176,
+  "input_bytes": 248832,
+  "output_bytes": 34020,
+  "schema_status": "ok",
+  "allocate_tensors_status": "ok",
+  "timed_invoke_status": "ok",
+  "profiler_overflowed": false,
+  "tflm_compatible": true,
+  "op_breakdown": [
+    {
+      "op_name": "ADD",
+      "count": 400,
+      "total_us": 65004,
+      "percent": 0.066
+    },
+    {
+      "op_name": "CONCATENATION",
+      "count": 950,
+      "total_us": 6324,
+      "percent": 0.006
+    },
+    {
+      "op_name": "CONV_2D",
+      "count": 3200,
+      "total_us": 90628861,
+      "percent": 92.548
+    },
+    {
+      "op_name": "DEQUANTIZE",
+      "count": 50,
+      "total_us": 184,
+      "percent": 0.0
+    },
+    {
+      "op_name": "LOGISTIC",
+      "count": 2900,
+      "total_us": 6428072,
+      "percent": 6.564
+    },
+    {
+      "op_name": "MAX_POOL_2D",
+      "count": 150,
+      "total_us": 46966,
+      "percent": 0.048
+    },
+    {
+      "op_name": "MUL",
+      "count": 2950,
+      "total_us": 418762,
+      "percent": 0.428
+    },
+    {
+      "op_name": "PAD",
+      "count": 350,
+      "total_us": 69030,
+      "percent": 0.07
+    },
+    {
+      "op_name": "QUANTIZE",
+      "count": 150,
+      "total_us": 8604,
+      "percent": 0.009
+    },
+    {
+      "op_name": "RESHAPE",
+      "count": 250,
+      "total_us": 374,
+      "percent": 0.0
+    },
+    {
+      "op_name": "RESIZE_NEAREST_NEIGHBOR",
+      "count": 100,
+      "total_us": 996,
+      "percent": 0.001
+    },
+    {
+      "op_name": "SOFTMAX",
+      "count": 50,
+      "total_us": 238191,
+      "percent": 0.243
+    },
+    {
+      "op_name": "SPLIT",
+      "count": 400,
+      "total_us": 7987,
+      "percent": 0.008
+    },
+    {
+      "op_name": "STRIDED_SLICE",
+      "count": 200,
+      "total_us": 452,
+      "percent": 0.0
+    },
+    {
+      "op_name": "SUB",
+      "count": 100,
+      "total_us": 1924,
+      "percent": 0.002
+    },
+    {
+      "op_name": "TRANSPOSE",
+      "count": 200,
+      "total_us": 4566,
+      "percent": 0.005
+    }
+  ],
+  "raw_x86_us_p50": 1954508.0,
+  "raw_x86_us_p95": 1995637.0,
+  "raw_x86_us_min": 1923345.0,
+  "raw_x86_us_max": 2022081.0,
+  "raw_x86_us_mean": 1958661.0,
+  "x86_to_s3_multiplier": 8.0,
+  "predicted_s3_us_p50": 15636064.0,
+  "predicted_s3_us_p95": 15965096.0,
+  "predicted_s3_fps": 0.06395471392289005,
+  "binary": "/home/phetamine/.archon/workspaces/sudosurmrf/catzap/worktrees/archon/thread-5bcc925a/firmware/edge-bench/build/edgebench",
+  "tflm_commit": "51bee03bed4776f1de88dd87226ff8c260f88e3c"
+}

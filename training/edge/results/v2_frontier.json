@@ -1,0 +1,255 @@
+{
+  "frontier": [
+    {
+      "story_id": "iter-D: INT8w/INT16a",
+      "source": "iter-D_mixed_int.json",
+      "map50": 0.48854101509113096,
+      "size_bytes": 3298712,
+      "arena_used_bytes": 1307552,
+      "predicted_p4_latency_ms_p50": 5480.76,
+      "predicted_p4_fps": 0.1824564476459469,
+      "pareto_verdict": "equal"
+    },
+    {
+      "story_id": "iter-G: NMS off-graph",
+      "source": "iter-G_off_graph_nms.json",
+      "map50": 0.2154782597952959,
+      "size_bytes": 3221000,
+      "arena_used_bytes": 692912,
+      "predicted_p4_latency_ms_p50": 5784.49,
+      "predicted_p4_fps": 0.17287608760668616,
+      "pareto_verdict": "equal"
+    },
+    {
+      "story_id": "iter-B: imgsz=224",
+      "source": "iter-B_imgsz_224.json",
+      "map50": 0.2154782597952959,
+      "size_bytes": 3221672,
+      "arena_used_bytes": 692912,
+      "predicted_p4_latency_ms_p50": 5796.17,
+      "predicted_p4_fps": 0.17252772089155424,
+      "pareto_verdict": "equal"
+    },
+    {
+      "story_id": "iter-A: per-channel quant (v2 floor)",
+      "source": "iter-A_per_channel_quant.json",
+      "map50": 0.2154782597952959,
+      "size_bytes": 3221000,
+      "arena_used_bytes": 692912,
+      "predicted_p4_latency_ms_p50": 5820.51,
+      "predicted_p4_fps": 0.17180625065501132,
+      "pareto_verdict": "equal"
+    },
+    {
+      "story_id": "iter-B: imgsz=256",
+      "source": "iter-B_imgsz_256.json",
+      "map50": 0.20400101212158742,
+      "size_bytes": 3222664,
+      "arena_used_bytes": 878256,
+      "predicted_p4_latency_ms_p50": 7651.81,
+      "predicted_p4_fps": 0.13068803328885584,
+      "pareto_verdict": "regress"
+    },
+    {
+      "story_id": "iter-B: imgsz=288",
+      "source": "iter-B_imgsz_288.json",
+      "map50": 0.1983069756287211,
+      "size_bytes": 3224432,
+      "arena_used_bytes": 1088176,
+      "predicted_p4_latency_ms_p50": 9772.54,
+      "predicted_p4_fps": 0.10232754227662408,
+      "pareto_verdict": "regress"
+    },
+    {
+      "story_id": "iter-B: imgsz=320",
+      "source": "iter-B_imgsz_320.json",
+      "map50": 0.19952147064245757,
+      "size_bytes": 3225624,
+      "arena_used_bytes": 1322672,
+      "predicted_p4_latency_ms_p50": 12062.99,
+      "predicted_p4_fps": 0.08289818693375357,
+      "pareto_verdict": "regress"
+    }
+  ],
+  "winner": {
+    "story_id": "iter-D: INT8w/INT16a",
+    "source": "iter-D_mixed_int.json",
+    "map50": 0.48854101509113096,
+    "size_bytes": 3298712,
+    "arena_used_bytes": 1307552,
+    "predicted_p4_latency_ms_p50": 5480.76,
+    "predicted_p4_fps": 0.1824564476459469
+  },
+  "deprecated_v1": [
+    {
+      "story_id": "YOLOv8n-cat INT8 (US-004)",
+      "source": "US-004.json",
+      "map50": 0.0,
+      "size_bytes": 3220840
+    },
+    {
+      "story_id": "YOLOv8n-cat-QAT INT8 (US-005)",
+      "source": "US-005.json",
+      "map50": 0.0,
+      "size_bytes": 3220840
+    },
+    {
+      "story_id": "YOLOv8n-cat-distilled INT8 (US-006)",
+      "source": "US-006-int8.json",
+      "map50": 0.20470688237296086,
+      "size_bytes": 3220840
+    },
+    {
+      "story_id": "NanoDet-cat INT8 (US-009)",
+      "source": "US-009.json",
+      "map50": 0.0,
+      "size_bytes": 1613072
+    }
+  ],
+  "missing": [],
+  "all_iter_rows": [
+    {
+      "story_id": "iter-A: per-channel quant (v2 floor)",
+      "source": "iter-A_per_channel_quant.json",
+      "status": "passed",
+      "blocked_reason": null,
+      "pareto_verdict": "equal",
+      "map50": 0.2154782597952959,
+      "size_bytes": 3221000,
+      "arena_used_bytes": 692912,
+      "predicted_p4_latency_ms_p50": 5820.51,
+      "predicted_p4_fps": 0.17180625065501132,
+      "tflm_compatible": true
+    },
+    {
+      "story_id": "iter-B: imgsz=192",
+      "source": "iter-B_imgsz_192.json",
+      "status": "passed",
+      "blocked_reason": null,
+      "pareto_verdict": "regress",
+      "map50": 0.0,
+      "size_bytes": 3220672,
+      "arena_used_bytes": 532144,
+      "predicted_p4_latency_ms_p50": 4244.805,
+      "predicted_p4_fps": 0.23558208209799977,
+      "tflm_compatible": true
+    },
+    {
+      "story_id": "iter-B: imgsz=224",
+      "source": "iter-B_imgsz_224.json",
+      "status": "passed",
+      "blocked_reason": null,
+      "pareto_verdict": "equal",
+      "map50": 0.2154782597952959,
+      "size_bytes": 3221672,
+      "arena_used_bytes": 692912,
+      "predicted_p4_latency_ms_p50": 5796.17,
+      "predicted_p4_fps": 0.17252772089155424,
+      "tflm_compatible": true
+    },
+    {
+      "story_id": "iter-B: imgsz=256",
+      "source": "iter-B_imgsz_256.json",
+      "status": "passed",
+      "blocked_reason": null,
+      "pareto_verdict": "regress",
+      "map50": 0.20400101212158742,
+      "size_bytes": 3222664,
+      "arena_used_bytes": 878256,
+      "predicted_p4_latency_ms_p50": 7651.81,
+      "predicted_p4_fps": 0.13068803328885584,
+      "tflm_compatible": true
+    },
+    {
+      "story_id": "iter-B: imgsz=288",
+      "source": "iter-B_imgsz_288.json",
+      "status": "passed",
+      "blocked_reason": null,
+      "pareto_verdict": "regress",
+      "map50": 0.1983069756287211,
+      "size_bytes": 3224432,
+      "arena_used_bytes": 1088176,
+      "predicted_p4_latency_ms_p50": 9772.54,
+      "predicted_p4_fps": 0.10232754227662408,
+      "tflm_compatible": true
+    },
+    {
+      "story_id": "iter-B: imgsz=320",
+      "source": "iter-B_imgsz_320.json",
+      "status": "passed",
+      "blocked_reason": null,
+      "pareto_verdict": "regress",
+      "map50": 0.19952147064245757,
+      "size_bytes": 3225624,
+      "arena_used_bytes": 1322672,
+      "predicted_p4_latency_ms_p50": 12062.99,
+      "predicted_p4_fps": 0.08289818693375357,
+      "tflm_compatible": true
+    },
+    {
+      "story_id": "iter-C: pruned 25%",
+      "source": "iter-C_pruned.json",
+      "status": "passed",
+      "blocked_reason": null,
+      "pareto_verdict": "regress",
+      "map50": 0.0,
+      "size_bytes": 3220832,
+      "arena_used_bytes": 692784,
+      "predicted_p4_latency_ms_p50": 5855.44,
+      "predicted_p4_fps": 0.1707813588731163,
+      "tflm_compatible": true
+    },
+    {
+      "story_id": "iter-D: INT8w/INT16a",
+      "source": "iter-D_mixed_int.json",
+      "status": "passed",
+      "blocked_reason": null,
+      "pareto_verdict": "equal",
+      "map50": 0.48854101509113096,
+      "size_bytes": 3298712,
+      "arena_used_bytes": 1307552,
+      "predicted_p4_latency_ms_p50": 5480.76,
+      "predicted_p4_fps": 0.1824564476459469,
+      "tflm_compatible": true
+    },
+    {
+      "story_id": "iter-E: width=0.75x",
+      "source": "iter-E_yolov8n_0p75x.json",
+      "status": "passed",
+      "blocked_reason": null,
+      "pareto_verdict": "regress",
+      "map50": 0.0,
+      "size_bytes": 1977944,
+      "arena_used_bytes": 683312,
+      "predicted_p4_latency_ms_p50": 3804.66,
+      "predicted_p4_fps": 0.2628355753207908,
+      "tflm_compatible": true
+    },
+    {
+      "story_id": "iter-F: NanoDet per-channel",
+      "source": "iter-F_nanodet_per_channel.json",
+      "status": "passed",
+      "blocked_reason": null,
+      "pareto_verdict": "regress",
+      "map50": 0.0,
+      "size_bytes": 1613232,
+      "arena_used_bytes": 2253888,
+      "predicted_p4_latency_ms_p50": 8940.67,
+      "predicted_p4_fps": 0.11184844088865824,
+      "tflm_compatible": true
+    },
+    {
+      "story_id": "iter-G: NMS off-graph",
+      "source": "iter-G_off_graph_nms.json",
+      "status": "passed",
+      "blocked_reason": null,
+      "pareto_verdict": "equal",
+      "map50": 0.2154782597952959,
+      "size_bytes": 3221000,
+      "arena_used_bytes": 692912,
+      "predicted_p4_latency_ms_p50": 5784.49,
+      "predicted_p4_fps": 0.17287608760668616,
+      "tflm_compatible": true
+    }
+  ]
+}

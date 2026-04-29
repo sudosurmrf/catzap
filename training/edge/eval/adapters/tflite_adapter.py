@@ -46,8 +46,13 @@ class TfliteAdapter:
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         x = rgb.astype(np.float32) / 255.0
         x = x[None, ...]
+        # Cast based on the model's actual input dtype reported by
+        # allocate_tensors() — that's authoritative. The is_int8 flag only
+        # toggles how mAP is post-processed (output dequant) and does not
+        # force a cast: iter-D produces a quantized model with float32 IO
+        # (INT16 activations + INT8 weights, exposed as float at the seam).
         in_dt = self.input_details[0]["dtype"]
-        if in_dt == np.int8 or self.is_int8:
+        if in_dt == np.int8:
             scale, zero = self.input_details[0].get("quantization", (0.0, 0))
             if scale and scale != 0:
                 x = (x / scale + zero).round().astype(np.int8)

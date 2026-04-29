@@ -1,0 +1,184 @@
+{
+  "story_id": "iter-D",
+  "title": "Mixed INT8/INT16 quantization: INT8 weights + INT16 activations via TFLite EXPERIMENTAL_TFLITE_BUILTINS_ACTIVATIONS_INT16_WEIGHTS_INT8",
+  "status": "passed",
+  "blocked_reason": null,
+  "model_path": "training/edge/models/yolov8n_cat_distilled_int8w_int16a.tflite",
+  "p4_multiplier": 5.0,
+  "p4_multiplier_source": "Conservative midpoint between scalar-reference (~6x x86) and vector-ext / dual-core ideal (~3x x86); v1 used 8.0 for ESP32-S3. Update once real ESP32-P4 measurements land.",
+  "chosen_path": "Path (1) \u2014 full INT16 activations + INT8 weights via TF builtin EXPERIMENTAL_TFLITE_BUILTINS_ACTIVATIONS_INT16_WEIGHTS_INT8. Path (2) (head-only INT16 via two-binary firmware loader) was deferred per PRD technical-notes guidance.",
+  "eval": {
+    "story_id": "iter-D",
+    "model_path": "training/edge/models/yolov8n_cat_distilled_int8w_int16a.tflite",
+    "model_format": "tflite_int8",
+    "map50": 0.48854101509113096,
+    "size_bytes": 3298712,
+    "params": 8441153,
+    "flops": 0,
+    "input_hw": [
+      224,
+      224
+    ],
+    "latency_ms_p50": 112.68899001879618,
+    "latency_ms_p95": 116.52688564208802,
+    "val_images": 120,
+    "notes": ""
+  },
+  "tflm": {
+    "story_id": "iter-D",
+    "model_path": "training/edge/models/yolov8n_cat_distilled_int8w_int16a.tflite",
+    "model_size_bytes": 3298712,
+    "runs": 50,
+    "arena_size_bytes": 8388608,
+    "arena_used_bytes": 1307552,
+    "input_bytes": 602112,
+    "output_bytes": 20580,
+    "schema_status": "ok",
+    "allocate_tensors_status": "ok",
+    "timed_invoke_status": "ok",
+    "profiler_overflowed": false,
+    "tflm_compatible": true,
+    "op_breakdown": [
+      {
+        "op_name": "ADD",
+        "count": 400,
+        "total_us": 38844,
+        "percent": 0.071
+      },
+      {
+        "op_name": "CONCATENATION",
+        "count": 950,
+        "total_us": 4780,
+        "percent": 0.009
+      },
+      {
+        "op_name": "CONV_2D",
+        "count": 3200,
+        "total_us": 54243904,
+        "percent": 98.826
+      },
+      {
+        "op_name": "DEQUANTIZE",
+        "count": 50,
+        "total_us": 138,
+        "percent": 0.0
+      },
+      {
+        "op_name": "LOGISTIC",
+        "count": 2900,
+        "total_us": 133659,
+        "percent": 0.244
+      },
+      {
+        "op_name": "MAX_POOL_2D",
+        "count": 150,
+        "total_us": 15055,
+        "percent": 0.027
+      },
+      {
+        "op_name": "MUL",
+        "count": 2950,
+        "total_us": 250537,
+        "percent": 0.456
+      },
+      {
+        "op_name": "PAD",
+        "count": 350,
+        "total_us": 42755,
+        "percent": 0.078
+      },
+      {
+        "op_name": "QUANTIZE",
+        "count": 1500,
+        "total_us": 130181,
+        "percent": 0.237
+      },
+      {
+        "op_name": "RESHAPE",
+        "count": 250,
+        "total_us": 401,
+        "percent": 0.001
+      },
+      {
+        "op_name": "RESIZE_NEAREST_NEIGHBOR",
+        "count": 100,
+        "total_us": 621,
+        "percent": 0.001
+      },
+      {
+        "op_name": "SOFTMAX",
+        "count": 50,
+        "total_us": 18264,
+        "percent": 0.033
+      },
+      {
+        "op_name": "SPLIT",
+        "count": 400,
+        "total_us": 5311,
+        "percent": 0.01
+      },
+      {
+        "op_name": "STRIDED_SLICE",
+        "count": 200,
+        "total_us": 229,
+        "percent": 0.0
+      },
+      {
+        "op_name": "SUB",
+        "count": 100,
+        "total_us": 1081,
+        "percent": 0.002
+      },
+      {
+        "op_name": "TRANSPOSE",
+        "count": 200,
+        "total_us": 2522,
+        "percent": 0.005
+      }
+    ],
+    "raw_x86_us_p50": 1096152.0,
+    "raw_x86_us_p95": 1124116.0,
+    "raw_x86_us_min": 1077453.0,
+    "raw_x86_us_max": 1125744.0,
+    "raw_x86_us_mean": 1097883.0,
+    "x86_to_s3_multiplier": 8.0,
+    "predicted_s3_us_p50": 8769216.0,
+    "predicted_s3_us_p95": 8992928.0,
+    "predicted_s3_fps": 0.11403527977871682,
+    "binary": "/home/phetamine/.archon/workspaces/sudosurmrf/catzap/worktrees/archon/thread-5bcc925a/firmware/edge-bench/build/edgebench",
+    "tflm_commit": "51bee03bed4776f1de88dd87226ff8c260f88e3c"
+  },
+  "pareto": {
+    "verdict": "equal",
+    "baseline_story": "iter-A (per-channel float-output INT8 KD distilled)",
+    "baseline_map50": 0.2154782597952959,
+    "baseline_size_bytes": 3221000,
+    "baseline_arena_used_bytes": 692912,
+    "baseline_predicted_p4_latency_ms_p50": 5820.51,
+    "deltas": {
+      "map50": 0.27306275529583507,
+      "size_pct": 2.4126668736417263,
+      "arena_pct": 88.70390468053664,
+      "latency_pct": -5.837117366004009
+    },
+    "thresholds": {
+      "map_regress_tolerance": 0.0,
+      "latency_improve_pct": 15.0,
+      "size_improve_pct": 20.0,
+      "arena_improve_pct": 15.0
+    }
+  },
+  "candidate_metrics": {
+    "map50": 0.48854101509113096,
+    "size_bytes": 3298712,
+    "arena_used_bytes": 1307552,
+    "predicted_p4_latency_ms_p50": 5480.76,
+    "predicted_p4_fps": 0.1824564476459469
+  },
+  "baseline_metrics": {
+    "map50": 0.2154782597952959,
+    "size_bytes": 3221000,
+    "arena_used_bytes": 692912,
+    "predicted_p4_latency_ms_p50": 5820.51
+  }
+}

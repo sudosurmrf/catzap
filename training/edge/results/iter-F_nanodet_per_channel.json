@@ -1,0 +1,212 @@
+{
+  "story_id": "iter-F",
+  "title": "NanoDet revisit with per-channel quant: float32 OUTPUT dequant on the NanoDet-Plus head \u2014 same iter-A converter delta applied to the v1 US-009 PTQ pipeline",
+  "status": "passed",
+  "blocked_reason": null,
+  "model_path": "training/edge/models/nanodet_cat_0.5x_224_int8_pc.tflite",
+  "p4_multiplier": 5.0,
+  "p4_multiplier_source": "Conservative midpoint between scalar-reference (~6x x86) and vector-ext / dual-core ideal (~3x x86); v1 used 8.0 for ESP32-S3. Update once real ESP32-P4 measurements land.",
+  "deviation_note": "imgsz=416 not 224: only the upstream nanodet-plus-m_416.onnx is published (NO 0.5x .pth; v1 US-007/US-008 deviation). Canonical filename nanodet_cat_0.5x_224_int8_pc.tflite is preserved for spec consistency; the actual model is the 1.0x backbone at 416. Re-run after US-008's venv-gated cat fine-tune produces a true 0.5x .pth at 224.",
+  "eval": {
+    "story_id": "iter-F",
+    "model_path": "training/edge/models/nanodet_cat_0.5x_224_int8_pc.tflite",
+    "model_format": "tflite_int8",
+    "map50": 0.0,
+    "size_bytes": 1613232,
+    "params": 47565308,
+    "flops": 0,
+    "input_hw": [
+      416,
+      416
+    ],
+    "latency_ms_p50": 56.24930851627141,
+    "latency_ms_p95": 57.83338400215143,
+    "val_images": 120,
+    "notes": ""
+  },
+  "tflm": {
+    "story_id": "iter-F",
+    "model_path": "training/edge/models/nanodet_cat_0.5x_224_int8_pc.tflite",
+    "model_size_bytes": 1613232,
+    "runs": 50,
+    "arena_size_bytes": 8388608,
+    "arena_used_bytes": 2253888,
+    "input_bytes": 519168,
+    "output_bytes": 1611904,
+    "schema_status": "ok",
+    "allocate_tensors_status": "ok",
+    "timed_invoke_status": "ok",
+    "profiler_overflowed": false,
+    "tflm_compatible": true,
+    "op_breakdown": [
+      {
+        "op_name": "ADD",
+        "count": 250,
+        "total_us": 116993,
+        "percent": 0.13
+      },
+      {
+        "op_name": "CONCATENATION",
+        "count": 1650,
+        "total_us": 17834,
+        "percent": 0.02
+      },
+      {
+        "op_name": "CONV_2D",
+        "count": 3350,
+        "total_us": 79116376,
+        "percent": 88.038
+      },
+      {
+        "op_name": "DEPTHWISE_CONV_2D",
+        "count": 2150,
+        "total_us": 8172542,
+        "percent": 9.094
+      },
+      {
+        "op_name": "DEQUANTIZE",
+        "count": 50,
+        "total_us": 8937,
+        "percent": 0.01
+      },
+      {
+        "op_name": "LEAKY_RELU",
+        "count": 3550,
+        "total_us": 1095857,
+        "percent": 1.219
+      },
+      {
+        "op_name": "LOGISTIC",
+        "count": 200,
+        "total_us": 600332,
+        "percent": 0.668
+      },
+      {
+        "op_name": "MAX_POOL_2D",
+        "count": 50,
+        "total_us": 202106,
+        "percent": 0.225
+      },
+      {
+        "op_name": "PAD",
+        "count": 550,
+        "total_us": 167978,
+        "percent": 0.187
+      },
+      {
+        "op_name": "PADV2",
+        "count": 50,
+        "total_us": 73182,
+        "percent": 0.081
+      },
+      {
+        "op_name": "QUANTIZE",
+        "count": 300,
+        "total_us": 50016,
+        "percent": 0.056
+      },
+      {
+        "op_name": "RESHAPE",
+        "count": 1800,
+        "total_us": 5438,
+        "percent": 0.006
+      },
+      {
+        "op_name": "RESIZE_BILINEAR",
+        "count": 100,
+        "total_us": 41735,
+        "percent": 0.046
+      },
+      {
+        "op_name": "SPLIT_V",
+        "count": 200,
+        "total_us": 6472,
+        "percent": 0.007
+      },
+      {
+        "op_name": "STRIDED_SLICE",
+        "count": 1300,
+        "total_us": 7032,
+        "percent": 0.008
+      },
+      {
+        "op_name": "TRANSPOSE",
+        "count": 2650,
+        "total_us": 183709,
+        "percent": 0.204
+      }
+    ],
+    "raw_x86_us_p50": 1788134.0,
+    "raw_x86_us_p95": 1844049.0,
+    "raw_x86_us_min": 1769591.0,
+    "raw_x86_us_max": 1859462.0,
+    "raw_x86_us_mean": 1797575.0,
+    "x86_to_s3_multiplier": 8.0,
+    "predicted_s3_us_p50": 14305072.0,
+    "predicted_s3_us_p95": 14752392.0,
+    "predicted_s3_fps": 0.0699052755554114,
+    "binary": "/home/phetamine/.archon/workspaces/sudosurmrf/catzap/worktrees/archon/thread-5bcc925a/firmware/edge-bench/build/edgebench",
+    "tflm_commit": "51bee03bed4776f1de88dd87226ff8c260f88e3c"
+  },
+  "pareto_vs_nanodet": {
+    "verdict": "equal",
+    "baseline_story": "US-009 (v1 NanoDet INT8 with int8-output cls collapse)",
+    "baseline_map50": 0.0,
+    "baseline_size_bytes": 1613072,
+    "baseline_arena_used_bytes": 2253792,
+    "baseline_predicted_p4_latency_ms_p50": 9172.74,
+    "deltas": {
+      "map50": 0.0,
+      "size_pct": 0.00991896207980797,
+      "arena_pct": 0.004259488009541253,
+      "latency_pct": -2.5299964895985245
+    },
+    "thresholds": {
+      "map_regress_tolerance": 0.0,
+      "latency_improve_pct": 15.0,
+      "size_improve_pct": 20.0,
+      "arena_improve_pct": 15.0
+    }
+  },
+  "pareto_vs_yolo_v2_frontier": {
+    "verdict": "regress",
+    "baseline_story": "iter-A (v2 YOLOv8n frontier \u2014 KD distilled INT8 with float-output dequant)",
+    "baseline_map50": 0.2154782597952959,
+    "baseline_size_bytes": 3221000,
+    "baseline_arena_used_bytes": 692912,
+    "baseline_predicted_p4_latency_ms_p50": 5820.51,
+    "deltas": {
+      "map50": -0.2154782597952959,
+      "size_pct": -49.91518162061472,
+      "arena_pct": 225.27766873715566,
+      "latency_pct": 53.60629910437401
+    },
+    "thresholds": {
+      "map_regress_tolerance": 0.0,
+      "latency_improve_pct": 15.0,
+      "size_improve_pct": 20.0,
+      "arena_improve_pct": 15.0
+    }
+  },
+  "candidate_metrics": {
+    "map50": 0.0,
+    "size_bytes": 1613232,
+    "arena_used_bytes": 2253888,
+    "predicted_p4_latency_ms_p50": 8940.67,
+    "predicted_p4_fps": 0.11184844088865824
+  },
+  "nanodet_baseline_metrics": {
+    "story": "US-009 (v1 NanoDet INT8 with int8-output cls collapse)",
+    "map50": 0.0,
+    "size_bytes": 1613072,
+    "arena_used_bytes": 2253792,
+    "predicted_p4_latency_ms_p50": 9172.74
+  },
+  "yolo_v2_frontier_metrics": {
+    "story": "iter-A (v2 YOLOv8n frontier \u2014 KD distilled INT8 with float-output dequant)",
+    "map50": 0.2154782597952959,
+    "size_bytes": 3221000,
+    "arena_used_bytes": 692912,
+    "predicted_p4_latency_ms_p50": 5820.51
+  }
+}
