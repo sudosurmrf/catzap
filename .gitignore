@@ -58,6 +58,12 @@ training/edge/models/sweep_imgsz/
 # is purely intermediate.
 training/edge/models/yolov8n_cat_qat.pt
 
+# iter-C pruned-and-finetuned intermediate checkpoint — regenerable via
+# `python -m training.edge.yolo.prune_channels`. Downstream uses the
+# .tflite (also gitignored). Pure intermediate, same pattern as the
+# QAT checkpoint above.
+training/edge/models/yolov8n_cat_pruned.pt
+
 # onnx2tf-internal calibration sample (auto-downloaded; not part of our PoC).
 calibration_image_sample_data_*.npy
 

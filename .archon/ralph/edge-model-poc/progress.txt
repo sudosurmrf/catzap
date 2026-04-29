@@ -1,5 +1,47 @@
 ## Codebase Patterns
 
+### iter-C finding: soft prune + supervised-only finetune erodes KD cls signal
+- Where: `training/edge/results/iter-C.md` ("Why mAP collapsed at PTQ —
+  the diagnosis") + `training/edge/yolo/prune_channels.py:_default_trainer_fn`
+- Pattern: iter-A's mAP=0.215 INT8 only survives because US-006 KD
+  shaped the cls logits to a magnitude the per-tensor activation
+  quantizer can preserve. Any post-hoc finetune of the iter-A `.pt`
+  that uses ONLY supervised loss (no distillation signal) drifts the
+  cls activation distribution back toward magnitudes the quantizer
+  crushes — re-triggering the v1 PTQ cls collapse pattern. iter-C's
+  result (fp32 mAP 0.706, INT8 mAP 0.000) is the empirical proof.
+  Future "modify the .pt then re-quantize via iter-A" work (iter-E
+  retrain at width=0.75x is OK because it re-runs distill_train; but
+  any prune/finetune-only flow should keep KD in the loop).
+
+### iter-C finding: soft prune does NOT shrink TFLite arena or size
+- Where: `training/edge/results/iter-C.md` ("Numbers" table)
+- Pattern: zeroing 25 % of `Conv2d` output channels via
+  `torch.nn.utils.prune.LnStructured` + `prune.remove` produces
+  identical .tflite size (within 168 B), identical arena_used_bytes
+  (within 128 B), and identical predicted P4 latency (within 0.6 %).
+  Reason: the per-channel weight scale tables, the int8 zero points,
+  and the convolution Op metadata don't shrink when channels go to
+  zero — only the raw weight bytes (which compress, but the
+  flatbuffer alignment overhead dominates at this model scale).
+  Realizing soft-prune as a real efficiency lever requires hard
+  channel removal + Detect-head re-init (out of scope for iter-C;
+  candidate for a follow-on dedicated story).
+
+### ultralytics `device='auto'` literal fails on CUDA-less hosts
+- Where: `training/edge/yolo/prune_channels.py:DEFAULT_DEVICE` +
+  `training/edge/yolo/prune_channels.py:_default_trainer_fn`
+- Pattern: ultralytics 8.2's `select_device('auto')` raises
+  `ValueError: Invalid CUDA 'device=auto' requested` when
+  `torch.cuda.is_available()` is False. The two safe defaults are
+  `device=''` (empty string lets ultralytics pick CUDA/MPS/CPU
+  automatically) or `device='cpu'` (force CPU). iter-C codified
+  `DEFAULT_DEVICE = ""` and added a CLI `--device` flag. Existing
+  US-003 / US-006 train scripts use `device='auto'` and have so far
+  worked because they ran on CUDA-equipped hosts; future stories
+  that need to run on a CUDA-less dev box should follow iter-C's
+  empty-string convention.
+
 ### Sweep orchestrator with per-row failure isolation
 - Where: `training/edge/yolo/imgsz_sweep.py:sweep` +
   `training/edge/tests/test_imgsz_sweep.py::test_sweep_continues_past_a_single_quantize_failure`
@@ -1583,5 +1625,113 @@ a future smaller-crop retrain story is the right path.
   `_default_bench_fn` mirrors that pattern at module import time,
   not on first call, so both behaviors and the test's stub-replacement
   work identically.
+
+---
+
+## 2026-04-28 — iter-C: Structured channel pruning of distilled student
+
+**Status**: PASSED (Pareto verdict: regress)
+**Files changed**:
+- training/edge/yolo/prune_channels.py — `prune_l2_channels` (L2-norm
+  output-channel structured prune, head-excluded by `Detect`/`DFL` class
+  match) + `_default_trainer_fn` (prune in-place THEN ultralytics 1-epoch
+  finetune, single call) + `run_pipeline` (full prune→quant→eval→bench
+  orchestrator with per-stage failure isolation; mirrors the iter-B
+  sweep contract). Module-level DI seams: yolo_factory, pruner_fn,
+  trainer_fn, quantize_fn, eval_fn, bench_fn, baseline_loader.
+- training/edge/tests/test_prune_channels.py — 9 tests (18 with
+  parametrize expansion). Required AC tests: (1) sparsity reduction
+  matches 0.25 target on a real torch.nn.Conv2d module, (2) the Detect
+  head is excluded from pruning when exclude_head=True, (3) the
+  pipeline calls quantize AFTER trainer (load-bearing ordering check).
+  Plus blocked-path tests + schema validation + DI-on-mocked-nn tests.
+- training/edge/results/iter-C.md — full report with prune_summary
+  table, fp32-vs-int8 mAP diagnosis, Pareto verdict explanation, and
+  reproduce sequence.
+- training/edge/results/iter-C_pruned.json — main rollup deliverable.
+  status=passed; verdict=regress; mAP candidate=0.0 vs iter-A 0.2155;
+  size 3.22 MB (-0.005%); arena 692,784 B (-0.018%); P4 latency 5,855 ms
+  (+0.6%); prune_summary embedded with module-by-module breakdown.
+- training/edge/results/iter-C_eval.json — eval-harness sidecar.
+- training/edge/results/iter-C_bench-tflm.json — TFLM bench sidecar.
+- .gitignore — `training/edge/models/yolov8n_cat_pruned.pt` (intermediate;
+  same pattern as `yolov8n_cat_qat.pt`).
+
+**Acceptance criteria verified**:
+- [x] `prune_l2_channels(model, sparsity=0.25, exclude_head=True)`
+  exists and uses `torch.nn.utils.prune.LnStructured` (verified by
+  `test_prune_l2_channels_reduces_params_by_target_sparsity`).
+- [x] CLI: `python -m training.edge.yolo.prune_channels --model ...
+  --sparsity 0.25 --finetune-epochs 1 --data ... --out ...` runs
+  prune+finetune via ultralytics .train() with single_cls=True,
+  imgsz=224, lr0=1e-4 (matches US-003 finetune signature).
+- [x] Re-quantizes via `per_channel_quant.export_per_channel_int8` ->
+  `training/edge/models/yolov8n_cat_pruned_int8_pc.tflite` (test
+  `test_pipeline_invokes_quantize_after_trainer` enforces ordering).
+- [x] Eval + edge-bench, emit
+  `training/edge/results/iter-C_pruned.json` with full Pareto-verdict
+  shape vs iter-A frontier (story_id, title, status, blocked_reason,
+  model_path, p4_multiplier, prune_summary, eval, tflm, pareto,
+  candidate_metrics, baseline_metrics — all 12 keys checked).
+- [x] `iter-C.md`: sparsity achieved (25.00%, 562,668/2,250,672
+  zeroed), mAP delta vs iter-A (-0.2155), latency/arena delta (+0.6%
+  / -0.018%), Pareto verdict (regress).
+- [x] `test_prune_channels.py` covers (a) sparsity match, (b) head
+  exclusion (`test_prune_l2_channels_skips_the_head_when_exclude_head_true`),
+  (c) CLI calls quantize after finetune.
+- [x] If finetune fails -> status='blocked' (verified by
+  `test_pipeline_blocks_when_finetune_fails`); JSON IS still written.
+- [x] git diff main -- server/ is empty.
+- [x] pytest -p no:asyncio training/edge/tests/ — 158 passed.
+
+**Real measured numbers (iter-C)**:
+  prune_summary: target=0.25, achieved=0.2500 (562,668/2,250,672 weights
+  zeroed, 45 conv layers pruned, 19 head/DFL conv layers skipped).
+  Pruned .pt fp32 mAP@0.5 (ultralytics validator) = 0.706.
+  INT8 .tflite mAP@0.5 (eval harness) = 0.000 (val=120 imgs, conf=0.25).
+  size_bytes 3,220,832 (delta -168 vs iter-A 3,221,000; -0.005%).
+  arena_used_bytes 692,784 (delta -128 vs 692,912; -0.018%).
+  raw_x86_us_p50 1,171,088 (delta +6,986; +0.60%).
+  predicted_p4_latency_ms_p50 5,855.44 (P4 multiplier=5.0).
+  predicted_p4_fps 0.171.
+  tflm_compatible=true; same 16-op breakdown as iter-A (CONV_2D 92.45%
+  / LOGISTIC 6.66% / others <1%); zero unsupported ops.
+
+**Learnings**:
+- Soft prune doesn't shrink the .tflite — flatbuffer compresses zero-
+  weight channels but the per-channel-weight-scale tables and metadata
+  don't shrink, so size and arena are unchanged. To realize size
+  benefit you need a HARD slice that physically removes the channels
+  AND re-shapes consumer layers' input channels. That's a Detect-head
+  re-init story (out of scope here; candidate for a future iter).
+- Finetune-only (no KD signal) erodes the v1 KD-shaped cls magnitudes
+  the iter-A PTQ depended on. The pruned-and-finetuned `.pt` retains
+  fp32 mAP=0.706 but the cls activation distribution shifts — by the
+  time the per-tensor activation quantizer sees the head output the
+  cls bucket is again dominated by xywh, which is the same failure
+  mode v1 documented in "YOLOv8 PTQ + per-tensor output quant
+  collapses cls head". Float-output dequant (iter-A's fix) only
+  preserves precision that survived the per-tensor activation scale —
+  it cannot recover precision that the head's cls logits never had to
+  begin with.
+- The natural mitigation is to re-introduce KD into the iter-C
+  finetune (prune the iter-A *student* and re-distill from yolov8s for
+  the 1 epoch). That's a reasonable follow-on but exceeds iter-C's
+  scope; documented in iter-C.md and flagged for iter-H deprecation
+  list.
+- ultralytics' `device='auto'` literal STRING is rejected when no CUDA
+  is available (`select_device` raises ValueError). Pass `device=''`
+  (empty string) for true auto-detection or `device='cpu'` to force
+  CPU. The PoC's existing US-003 / US-006 scripts use `device='auto'`
+  and have so far run on a CUDA-equipped workstation; this iteration
+  hit the failure on a CUDA-less host. Codified as a CLI flag.
+- Ultralytics' `img2label_paths` correctly resolves the flat
+  `<stem>.{jpg,txt}` US-002 dataset layout — no need to reorganize
+  into images/ and labels/ subdirs even when running CPU-only.
+- The ROI of soft pruning at this sparsity (25 %) for this checkpoint
+  (~3 M params, small enough that flatbuffer overhead dominates) is
+  approximately zero on every Pareto axis. Hard-prune + Detect-head
+  re-init is the only path to real gains; the v2 frontier should not
+  pursue soft-prune-only work without that combined treatment.
 
 ---

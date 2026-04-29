@@ -359,8 +359,8 @@
         "iter-A"
       ],
       "priority": 15,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented in iter-C iteration. Files: training/edge/yolo/prune_channels.py (prune_l2_channels + run_pipeline orchestrator with DI seams; CLI), training/edge/tests/test_prune_channels.py (9 cases; 18 with parametrize expansion), training/edge/results/iter-C.md, training/edge/results/iter-C_pruned.json + iter-C_eval.json + iter-C_bench-tflm.json sidecars. Pipeline ran end-to-end on CPU: 25.00% achieved sparsity (562,668 of 2,250,672 backbone+neck conv weights zeroed; 19 head/DFL conv layers correctly skipped); 1-epoch finetune at lr=1e-4 batch=8; pruned .pt fp32 mAP=0.706 (ultralytics validator); per-channel-friendly INT8 PTQ -> mAP=0.000 (cls collapse at PTQ \u2014 diagnosis matches v1 progress.txt 'YOLOv8 PTQ + per-tensor output quant collapses cls head'). Pareto verdict=regress vs iter-A 0.2155; iter-C NOT promoted to v2 frontier. Size 3.22 MB unchanged (soft prune doesn't shrink flatbuffer); arena 692,784 B (-0.018%); P4 latency 5,855 ms (+0.6%). 158 edge tests pass; git diff main -- server/ empty."
     },
     {
       "id": "iter-D",

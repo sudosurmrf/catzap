@@ -1,0 +1,262 @@
+{
+  "story_id": "iter-C",
+  "title": "Structured channel pruning of the iter-A frontier student (~25% L2-norm output channels, head excluded) + 1-epoch finetune + per-channel-friendly INT8 quant",
+  "status": "passed",
+  "blocked_reason": null,
+  "model_path": "training/edge/models/yolov8n_cat_pruned_int8_pc.tflite",
+  "p4_multiplier": 5.0,
+  "p4_multiplier_source": "Conservative midpoint between scalar-reference (~6x x86) and vector-ext / dual-core ideal (~3x x86); v1 used 8.0 for ESP32-S3. Update once real ESP32-P4 measurements land.",
+  "prune_summary": {
+    "sparsity_target": 0.25,
+    "exclude_head": true,
+    "head_indices": [
+      22
+    ],
+    "pruned_modules": [
+      "0.conv",
+      "1.conv",
+      "2.cv1.conv",
+      "2.cv2.conv",
+      "2.m.0.cv1.conv",
+      "2.m.0.cv2.conv",
+      "3.conv",
+      "4.cv1.conv",
+      "4.cv2.conv",
+      "4.m.0.cv1.conv",
+      "4.m.0.cv2.conv",
+      "4.m.1.cv1.conv",
+      "4.m.1.cv2.conv",
+      "5.conv",
+      "6.cv1.conv",
+      "6.cv2.conv",
+      "6.m.0.cv1.conv",
+      "6.m.0.cv2.conv",
+      "6.m.1.cv1.conv",
+      "6.m.1.cv2.conv",
+      "7.conv",
+      "8.cv1.conv",
+      "8.cv2.conv",
+      "8.m.0.cv1.conv",
+      "8.m.0.cv2.conv",
+      "9.cv1.conv",
+      "9.cv2.conv",
+      "12.cv1.conv",
+      "12.cv2.conv",
+      "12.m.0.cv1.conv",
+      "12.m.0.cv2.conv",
+      "15.cv1.conv",
+      "15.cv2.conv",
+      "15.m.0.cv1.conv",
+      "15.m.0.cv2.conv",
+      "16.conv",
+      "18.cv1.conv",
+      "18.cv2.conv",
+      "18.m.0.cv1.conv",
+      "18.m.0.cv2.conv",
+      "19.conv",
+      "21.cv1.conv",
+      "21.cv2.conv",
+      "21.m.0.cv1.conv",
+      "21.m.0.cv2.conv"
+    ],
+    "skipped_head_modules": [
+      "22.cv2.0.0.conv",
+      "22.cv2.0.1.conv",
+      "22.cv2.0.2",
+      "22.cv2.1.0.conv",
+      "22.cv2.1.1.conv",
+      "22.cv2.1.2",
+      "22.cv2.2.0.conv",
+      "22.cv2.2.1.conv",
+      "22.cv2.2.2",
+      "22.cv3.0.0.conv",
+      "22.cv3.0.1.conv",
+      "22.cv3.0.2",
+      "22.cv3.1.0.conv",
+      "22.cv3.1.1.conv",
+      "22.cv3.1.2",
+      "22.cv3.2.0.conv",
+      "22.cv3.2.1.conv",
+      "22.cv3.2.2",
+      "22.dfl.conv"
+    ],
+    "params_before": 2250672,
+    "params_after_nonzero": 1688004,
+    "params_zeroed": 562668,
+    "actual_sparsity": 0.25
+  },
+  "eval": {
+    "story_id": "iter-C_eval",
+    "model_path": "training/edge/models/yolov8n_cat_pruned_int8_pc.tflite",
+    "model_format": "tflite_int8",
+    "map50": 0.0,
+    "size_bytes": 3220832,
+    "params": 7869127,
+    "flops": 0,
+    "input_hw": [
+      224,
+      224
+    ],
+    "latency_ms_p50": 3.5373964929021895,
+    "latency_ms_p95": 3.950989048462361,
+    "val_images": 120,
+    "notes": ""
+  },
+  "tflm": {
+    "story_id": "iter-C_bench",
+    "model_path": "training/edge/models/yolov8n_cat_pruned_int8_pc.tflite",
+    "model_size_bytes": 3220832,
+    "runs": 50,
+    "arena_size_bytes": 8388608,
+    "arena_used_bytes": 692784,
+    "input_bytes": 150528,
+    "output_bytes": 20580,
+    "schema_status": "ok",
+    "allocate_tensors_status": "ok",
+    "timed_invoke_status": "ok",
+    "profiler_overflowed": false,
+    "tflm_compatible": true,
+    "op_breakdown": [
+      {
+        "op_name": "ADD",
+        "count": 400,
+        "total_us": 39165,
+        "percent": 0.067
+      },
+      {
+        "op_name": "CONCATENATION",
+        "count": 950,
+        "total_us": 3628,
+        "percent": 0.006
+      },
+      {
+        "op_name": "CONV_2D",
+        "count": 3200,
+        "total_us": 54328667,
+        "percent": 92.45
+      },
+      {
+        "op_name": "DEQUANTIZE",
+        "count": 50,
+        "total_us": 114,
+        "percent": 0.0
+      },
+      {
+        "op_name": "LOGISTIC",
+        "count": 2900,
+        "total_us": 3913966,
+        "percent": 6.66
+      },
+      {
+        "op_name": "MAX_POOL_2D",
+        "count": 150,
+        "total_us": 25891,
+        "percent": 0.044
+      },
+      {
+        "op_name": "MUL",
+        "count": 2950,
+        "total_us": 254075,
+        "percent": 0.432
+      },
+      {
+        "op_name": "PAD",
+        "count": 350,
+        "total_us": 42595,
+        "percent": 0.072
+      },
+      {
+        "op_name": "QUANTIZE",
+        "count": 100,
+        "total_us": 3638,
+        "percent": 0.006
+      },
+      {
+        "op_name": "RESHAPE",
+        "count": 250,
+        "total_us": 234,
+        "percent": 0.0
+      },
+      {
+        "op_name": "RESIZE_NEAREST_NEIGHBOR",
+        "count": 100,
+        "total_us": 533,
+        "percent": 0.001
+      },
+      {
+        "op_name": "SOFTMAX",
+        "count": 50,
+        "total_us": 144051,
+        "percent": 0.245
+      },
+      {
+        "op_name": "SPLIT",
+        "count": 400,
+        "total_us": 4872,
+        "percent": 0.008
+      },
+      {
+        "op_name": "STRIDED_SLICE",
+        "count": 200,
+        "total_us": 189,
+        "percent": 0.0
+      },
+      {
+        "op_name": "SUB",
+        "count": 100,
+        "total_us": 1192,
+        "percent": 0.002
+      },
+      {
+        "op_name": "TRANSPOSE",
+        "count": 200,
+        "total_us": 2889,
+        "percent": 0.005
+      }
+    ],
+    "raw_x86_us_p50": 1171088.0,
+    "raw_x86_us_p95": 1204600.0,
+    "raw_x86_us_min": 1155039.0,
+    "raw_x86_us_max": 1226109.0,
+    "raw_x86_us_mean": 1175438.0,
+    "x86_to_s3_multiplier": 8.0,
+    "predicted_s3_us_p50": 9368704.0,
+    "predicted_s3_us_p95": 9636800.0,
+    "predicted_s3_fps": 0.10673834929569767,
+    "binary": "/home/phetamine/.archon/workspaces/sudosurmrf/catzap/worktrees/archon/thread-5bcc925a/firmware/edge-bench/build/edgebench",
+    "tflm_commit": "51bee03bed4776f1de88dd87226ff8c260f88e3c"
+  },
+  "pareto": {
+    "verdict": "regress",
+    "baseline_story": "iter-A (per-channel-friendly INT8 PTQ; v2 accuracy floor)",
+    "baseline_map50": 0.2154782597952959,
+    "baseline_size_bytes": 3221000,
+    "baseline_arena_used_bytes": 692912,
+    "baseline_predicted_p4_latency_ms_p50": 5820.51,
+    "deltas": {
+      "map50": -0.2154782597952959,
+      "size_pct": -0.005215771499534306,
+      "arena_pct": -0.018472764218255708,
+      "latency_pct": 0.6001192335379439
+    },
+    "thresholds": {
+      "map_regress_tolerance": 0.0,
+      "latency_improve_pct": 15.0,
+      "size_improve_pct": 20.0,
+      "arena_improve_pct": 15.0
+    }
+  },
+  "candidate_metrics": {
+    "map50": 0.0,
+    "size_bytes": 3220832,
+    "arena_used_bytes": 692784,
+    "predicted_p4_latency_ms_p50": 5855.44,
+    "predicted_p4_fps": 0.1707813588731163
+  },
+  "baseline_metrics": {
+    "map50": 0.2154782597952959,
+    "size_bytes": 3221000,
+    "arena_used_bytes": 692912,
+    "predicted_p4_latency_ms_p50": 5820.51
+  }
+}
