@@ -1,5 +1,51 @@
 ## Codebase Patterns
 
+### iter-D finding: INT16 activations stack with iter-A float-output for huge mAP recovery
+- Where: `training/edge/yolo/mixed_int_quant.py` +
+  `training/edge/results/iter-D.md` ("Why this works")
+- Pattern: iter-A's float32 output dequant fixed cls collapse on the
+  output side (one DEQUANTIZE op after the head). iter-D is the
+  orthogonal internal-side fix: promote ALL activations to INT16 via
+  `EXPERIMENTAL_TFLITE_BUILTINS_ACTIVATIONS_INT16_WEIGHTS_INT8`. INT16
+  has 256x the dynamic range of INT8, so the head's pre-output
+  `(1, 5, 1029)` activation tensor can carry xywh and cls under one
+  per-tensor scale without crushing cls. Stacked, iter-A + iter-D
+  recover +0.273 absolute mAP (0.215 -> 0.488) over iter-A alone.
+  Cost: arena 2x (INT16 activations are 2x int8); P4 latency
+  unchanged on TFLM reference path. Weights stay INT8 / per-channel
+  so on-disk size is +2.4% only.
+
+### Mixed INT8/INT16 model is TFLM-compatible (op coverage held)
+- Where: `training/edge/results/iter-D-tflm.json:tflm_compatible` +
+  `training/edge/results/iter-D.md` ("TFLM compatibility")
+- Pattern: PRD's technical notes warned that the INT16x8 path might
+  trip TFLM's incomplete INT16 op coverage. Real result: every
+  INT16-activation op the converter emits (CONV_2D, MUL, LOGISTIC,
+  ADD, PAD, SOFTMAX, SPLIT, ...) IS implemented in TFLM's standard
+  op resolver. `allocate_tensors_status=ok`,
+  `tflm_compatible=true`. CONV_2D shifts from 92.5% (iter-A) to
+  98.83% (iter-D) of total inference time — INT16 raises CONV_2D's
+  compute cost more than proportionally vs lighter ops, but the
+  shift is internal and doesn't break compat. Future iterations that
+  need to recover cls precision under INT8-only mandates (e.g.
+  ESP-DL targets that don't support INT16 conv) will need the
+  head-split path (path (2) in PRD); for the current ESP32-P4
+  target the INT16x8 builtin is the simpler path.
+
+### tflite_adapter input cast keys off model dtype, not the is_int8 flag
+- Where: `training/edge/eval/adapters/tflite_adapter.py:_preprocess`
+- Pattern: the input-dtype branch used to be
+  `if in_dt == np.int8 OR self.is_int8`. iter-D's float-IO INT16x8
+  model exposes float32 input even though it's quantized internally,
+  and the OR condition forced an int8 cast that crashed the
+  interpreter. Fix: respect `input_details[0]['dtype']` (the
+  authoritative source from `allocate_tensors()`) only. The
+  `is_int8` flag is now purely informational — it does NOT force a
+  cast. Behavior preserved exactly for every v1 / iter-A INT8 model
+  (their `in_dt` is already int8, so the int8 branch still fires);
+  iter-A's mAP=0.215478 reproduces bit-exact post-tweak. Future
+  formats with float-or-int16 IO get adapter-compat for free.
+
 ### iter-C finding: soft prune + supervised-only finetune erodes KD cls signal
 - Where: `training/edge/results/iter-C.md` ("Why mAP collapsed at PTQ —
   the diagnosis") + `training/edge/yolo/prune_channels.py:_default_trainer_fn`
@@ -1733,5 +1779,113 @@ a future smaller-crop retrain story is the right path.
   approximately zero on every Pareto axis. Hard-prune + Detect-head
   re-init is the only path to real gains; the v2 frontier should not
   pursue soft-prune-only work without that combined treatment.
+
+---
+
+## 2026-04-28 — iter-D: Mixed INT8/INT16 quantization (INT8 weights + INT16 activations)
+
+**Status**: PASSED (Pareto verdict: `equal` under v2 thresholds; mAP gain
++0.273 absolute is the largest single-iteration accuracy lift in the
+v2 loop so far, but no efficiency axis improves past threshold AND
+arena regresses 88.7%, so iter-A remains the v2 LATENCY/ARENA
+frontier while iter-D becomes the v2 ACCURACY frontier.)
+
+**Files changed**:
+- training/edge/yolo/mixed_int_quant.py — module + CLI; mirrors iter-A's
+  per_channel_quant.py shape (DI seams on every stage). Single converter
+  knob delta: `supported_ops=[EXPERIMENTAL_TFLITE_BUILTINS_ACTIVATIONS_INT16_WEIGHTS_INT8]`
+  + float32 IO (kept iter-A's float-output dequant; promoted input to
+  float32 too for tflite_adapter compat without a new dtype branch).
+- training/edge/tests/test_mixed_int_quant.py — 4 mocked unit tests:
+  INT16x8 supported_ops + float IO; calibration_loader `is`-identity vs
+  export_quantize AND per_channel_quant; full DI chain; CLI blocked-
+  fallback writes a well-formed .export.json sidecar even on raised
+  exceptions (so iter-H aggregator can still render a "blocked" row).
+- training/edge/results/aggregate_iter_d.py — combines eval + TFLM bench
+  JSONs with `build_pareto_verdict`; baseline pulled from
+  `iter-A_per_channel_quant.candidate_metrics` (per progress.txt
+  pattern "baseline_metrics uses iter-A's candidate_metrics").
+- training/edge/results/iter-D.json — eval (mAP=0.4885, p50=112.69 ms;
+  p50 latency is XNNPACK-related, see Learnings).
+- training/edge/results/iter-D-tflm.json — TFLM x86 bench
+  (arena=1,307,552 B, x86_p50=1,096,152 us, tflm_compatible=true).
+- training/edge/results/iter-D_mixed_int.json — final aggregate with
+  pareto.verdict='equal', deltas {mAP:+0.2731, size:+2.41%,
+  arena:+88.70%, latency:-5.84%}.
+- training/edge/results/iter-D.md — short report covering chosen path
+  (path 1 — INT16x8 builtin, path 2 deferred), numbers table, verdict
+  reasoning, TFLM compat note, files list, reproduce.
+- training/edge/eval/adapters/tflite_adapter.py — small extension: input
+  dtype branch keys off `input_details[0]['dtype']` only (verified
+  iter-A mAP unchanged at 0.215478).
+- training/edge/models/yolov8n_cat_distilled_int8w_int16a.tflite —
+  3.30 MB (gitignored per existing models/* rule; regenerable from
+  the CLI in iter-D.md "Reproduce").
+
+**Acceptance criteria verified**:
+- [x] training/edge/yolo/mixed_int_quant.py produces a .tflite where
+  internal activations are INT16 + weights are INT8 (path 1; path 2
+  deferred per PRD technical-notes guidance).
+- [x] Fallback path: CLI emits well-formed `.export.json` with
+  `blocked_reason` even when the heavy quantize step raises (test 4
+  covers this; the actual run did NOT block — TFLM compat held).
+- [x] training/edge/results/iter-D_mixed_int.json with Pareto verdict
+  vs iter-A frontier — verdict='equal'.
+- [x] training/edge/results/iter-D.md with chosen path documented
+  (path 1 — INT16x8 builtin) + before/after table + verdict
+  reasoning.
+- [x] training/edge/tests/test_mixed_int_quant.py — 4 mocked tests
+  (>=2 required); all pass.
+- [x] git diff main -- server/ is empty (0 lines).
+- [x] CatDetector import smoke test passes.
+- [x] pytest -p no:asyncio training/edge/tests/ — 162 passed (was
+  158; +4 new from test_mixed_int_quant.py).
+
+**Learnings**:
+- INT16 activations + INT8 weights via TF's
+  `EXPERIMENTAL_TFLITE_BUILTINS_ACTIVATIONS_INT16_WEIGHTS_INT8` is a
+  single-knob change on top of iter-A's pipeline. The PRD's worry
+  about TFLM op coverage did NOT materialize — every op the converter
+  emits has a TFLM implementation registered. `tflm_compatible=true`,
+  `allocate_tensors_status=ok`. CONV_2D shifts from 92.5% to 98.83%
+  of inference time (INT16 raises CONV_2D's compute cost more than
+  proportionally vs lighter ops); this is internal and doesn't affect
+  compat.
+- The eval-harness host-CPU latency reading (112.69 ms) is misleading.
+  TFLite's XNNPACK delegate has been added to the Python interpreter
+  by default since 2.13 and accelerates INT8 paths but NOT INT16
+  activations, so the eval falls back to reference ops. The TFLM x86
+  bench (which never uses XNNPACK) shows iter-D actually marginally
+  FASTER than iter-A (-5.84% on raw_x86_us_p50). For predicted P4
+  numbers, trust the TFLM bench.
+- The PRD asked for "backbone INT8 + head INT16" specifically. We
+  delivered "everything INT16 activations + INT8 weights" (path 1)
+  because TF 2.17 has no per-op dtype override at converter time.
+  Path (2) — split-export and link two .tflites — requires ONNX
+  surgery on `ultralytics.nn.modules.head.Detect` and a two-binary
+  firmware loader, which is firmware territory. Documented in the
+  iter-D.md "Chosen path" section so iter-H's recommendation can
+  reflect this honestly.
+- Adapter tweak: `tflite_adapter._preprocess` used to OR the
+  `is_int8` flag with the actual model dtype. iter-D's float-IO model
+  hit the OR-true branch and crashed the interpreter with a dtype
+  mismatch. Tightened to respect `input_details[0]['dtype']` only —
+  iter-A regression test confirmed mAP unchanged to 6 decimal places.
+  Future formats with float-or-int16 IO get adapter-compat for free.
+- Pareto verdict `equal` is correct per `build_pareto_verdict` rules
+  (mAP held + no efficiency axis past threshold), but it understates
+  iter-D's value. The user's promotion rule excludes iter-D from
+  becoming the latency/arena frontier (no efficiency axis improved
+  past 15%/20% thresholds AND arena regressed +88.70%), but iter-D IS
+  the v2 accuracy frontier (+0.273 absolute mAP over iter-A — the
+  largest single-iteration lift). iter-H's decision matrix must show
+  both frontiers — they're at different Pareto points along the
+  accuracy/arena axes.
+- Decision implication for iter-H: ESP32-P4 has 32 MB PSRAM (PRD
+  context), so iter-D's 1.31 MB arena fits with 30+ MB of headroom.
+  When accuracy matters more than concurrent-model arena pressure,
+  iter-D wins. When arena pressure dominates (multi-model concurrent
+  inference, shared image-buffer constraints), iter-A wins. The
+  iter-H recommendation paragraph must surface this trade-off.
 
 ---

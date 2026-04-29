@@ -379,8 +379,8 @@
         "iter-A"
       ],
       "priority": 16,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented in iter-D iteration of v2 follow-on loop. Files: training/edge/yolo/mixed_int_quant.py (CLI + export_mixed_int_quant + quantize_to_int16x8_tflite; full DI seams mirroring iter-A); training/edge/tests/test_mixed_int_quant.py (4 mocked tests covering INT16x8 supported_ops + float IO + shared calibration_loader identity + blocked-fallback CLI sidecar); training/edge/results/aggregate_iter_d.py (Pareto-verdict aggregator vs iter-A); training/edge/results/iter-D.{json,md,_mixed_int.json,-tflm.json} + iter-D model at training/edge/models/yolov8n_cat_distilled_int8w_int16a.tflite (3.30 MB). Also small extension to training/edge/eval/adapters/tflite_adapter.py: input cast now keys off input_details[0]['dtype'] only (verified iter-A mAP unchanged at 0.215478). Chosen path: (1) full INT16 activations + INT8 weights via TFLite EXPERIMENTAL_TFLITE_BUILTINS_ACTIVATIONS_INT16_WEIGHTS_INT8. Real measured numbers: mAP=0.4885 (vs iter-A 0.2155, +0.2731 absolute = LARGEST v2 accuracy lift), arena 1,307,552 B (+88.7%), x86 p50 1,096,152 us (-5.84%), predicted P4 p50 5,480.76 ms (-5.84%), tflm_compatible=true. Verdict='equal' under v2 thresholds (no efficiency axis past threshold AND arena regressed); iter-D becomes the v2 ACCURACY frontier sitting alongside iter-A's LATENCY frontier. iter-H must show both. 162/162 edge tests pass; git diff main -- server/ empty; CatDetector import smoke OK."
     },
     {
       "id": "iter-E",
