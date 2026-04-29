@@ -1,5 +1,64 @@
 ## Codebase Patterns
 
+### Off-graph NMS verifier scans op_breakdown, not the .tflite schema
+- Where: `training/edge/eval/decode_only.py:verify_off_graph` +
+  `training/edge/eval/decode_only.py:IN_GRAPH_NMS_OPS` +
+  `training/edge/tests/test_decode_only.py` (3 verifier tests)
+- Pattern: rather than parsing the TFLite flatbuffer schema to look for
+  post-processing ops, scan the op_breakdown the existing edge-bench
+  TimingProfiler already emits. The four canonical "in-graph NMS" op
+  names (TFLite_Detection_PostProcess for SSD, NON_MAX_SUPPRESSION_V4/V5,
+  and TF's CombinedNonMaxSuppression) cover every exporter we've seen.
+  This re-uses the runs=N TFLM bench as the source of truth — no
+  duplicate flatbuffer parsing, and the verifier produces the same
+  result regardless of whether the model came from ultralytics ONNX
+  export, onnx2tf, or a hypothetical future tf.lite-direct path. If a
+  future iteration adds a NEW post-processing op name, add it to
+  `IN_GRAPH_NMS_OPS` (the regression test
+  `test_in_graph_nms_ops_set_covers_known_exporter_outputs` will catch
+  removals).
+
+### onnx2tf YOLOv8 .tflites strip post-processing entirely
+- Where: `training/edge/results/iter-G.md` ("Verifier output" — 16 ops,
+  zero NMS) + `training/edge/results/iter-G_off_graph_nms.json:verifier`
+- Pattern: every YOLOv8 .tflite produced via the v2 PTQ pipeline
+  (ultralytics ONNX export → onnx2tf SavedModel → TFLiteConverter)
+  emits backbone + neck + Detect-head convs ending in a single fp32
+  DEQUANTIZE on the `(1, 5, 1029)` cls/xywh tensor. Decode (xywh /
+  imgsz, threshold, xyxy, clip) and NMS are NOT in the graph — they
+  must run host-side in firmware C. iter-G's runs=200 op_breakdown
+  records this for iter-A's tflite (CONV_2D / LOGISTIC / ADD / MUL /
+  PAD / MAX_POOL_2D / RESIZE_NEAREST_NEIGHBOR / RESHAPE / TRANSPOSE /
+  SPLIT / CONCATENATION / STRIDED_SLICE / SUB / SOFTMAX / QUANTIZE /
+  DEQUANTIZE — 16 ops, none of them NMS). Same shape holds for iter-D
+  / iter-E candidates that share the export pipeline. Future stories
+  swapping to a different export (ultralytics' built-in `format='tflite'`
+  with `nms=True`, or any TF SavedModel containing
+  `tf.image.combined_non_max_suppression`) MUST re-verify.
+
+### Decode + NMS post-process budget is negligible vs YOLOv8n inference
+- Where: `training/edge/results/iter-G.md` ("Post-process budget") +
+  `training/edge/results/iter-G_off_graph_nms.json:post_process_budget`
+- Pattern: at imgsz=224 YOLOv8n emits 1,029 anchors. Decode is one
+  linear scan with ~6 FLOPs/anchor (max(cls), threshold, xywh/imgsz,
+  xywh→xyxy, clip) and NMS is O(K^2) on whatever survives the
+  threshold (typically <5 boxes for single-class cat detection).
+  Estimated cost on ESP32-P4 without ESP-DL: ~0.0154 ms total, vs
+  ~5,785 ms inference (~0.0003%). iter-H's SUMMARY_v2 can cite
+  `predicted_p4_ms_p50` directly as the v2 frontier latency without
+  budgeting extra time for off-graph post-process.
+
+### runs=200 edge-bench drift vs runs=50 is sub-1%
+- Where: `training/edge/results/iter-G_off_graph_nms.json:drift_vs_runs50`
+- Pattern: re-running iter-A's TFLM bench at 200 samples (vs 50 in
+  iter-A through iter-F) shifts p50 by -0.62% and p95 by -0.01% on
+  this hardware. Tight enough that the Pareto verdicts in iter-A
+  through iter-F do NOT need re-evaluation against runs=200 samples;
+  iter-H can cite the runs=50 numbers uniformly. Future iterations
+  that need especially tight p50/p95 (e.g. comparing two latency-
+  matched candidates at the 1% margin) should bump runs to 200, but
+  it's not a blanket requirement.
+
 ### iter-A's float-output dequant works on YOLOv8 but NOT NanoDet — predict before applying
 - Where: `training/edge/results/iter-F.md` ("Why YOLOv8 recovered and NanoDet did not")
   + `training/edge/nanodet/per_channel_quant.py` (thin wrapper that proves the recipe is reusable)
@@ -2245,4 +2304,103 @@ mAP to hold first.)
   it for iter-F too.
 
 ---
+
+
+## 2026-04-28 — iter-G: NMS off-graph + decode optimization for inference-only latency
+
+**Status**: PASSED (verifier: `off_graph_confirmed`)
+**Files added**:
+- `training/edge/eval/decode_only.py` — off-graph YOLOv8 decode (mirrors
+  `onnx_adapter._decode_yolo_onnx`'s xywh/imgsz + max-cls + xyxy + clip
+  math) + greedy single-class IoU NMS + `verify_off_graph()` op-breakdown
+  scanner. `IN_GRAPH_NMS_OPS = {TFLite_Detection_PostProcess,
+  NON_MAX_SUPPRESSION_V4, NON_MAX_SUPPRESSION_V5, CombinedNonMaxSuppression}`
+  is the canonical "things that would block off-graph" set.
+- `training/edge/tests/test_decode_only.py` — 8 tests: parity vs
+  `_decode_yolo_onnx` on a fixed (1,5,8) raw tensor; NMS drops
+  overlapping boxes (3→2); decode+NMS round-trip equivalence;
+  shape-fallback returns []; verifier flags `TFLite_Detection_PostProcess`;
+  verifier passes for the real iter-A 16-op set; multi-offender dedup
+  (alphabetical); `IN_GRAPH_NMS_OPS` covers the four exporter outputs.
+- `training/edge/results/aggregate_iter_g.py` — combines runs=200
+  edge-bench JSON with `verify_off_graph` into the iteration's
+  `iter-G_off_graph_nms.json`. Records inference-only latency, drift vs
+  iter-A's runs=50 numbers, and the decode+NMS post-process budget.
+- `training/edge/results/write_iter_g_md.py` — renders `iter-G.md` from
+  the aggregator JSON. Mirrors `iter-A.md` / `iter-D.md` shape.
+- `training/edge/results/iter-G_offgraph-tflm.json` — raw runs=200
+  edge-bench output (`raw_x86_us_p50=1,156,898 us`, `arena_used=692,912 B`,
+  `tflm_compatible=true`, 16 ops with no NMS/Detect post-process op).
+- `training/edge/results/iter-G_off_graph_nms.json` — final aggregate.
+- `training/edge/results/iter-G.md` — full narrative + tables +
+  reproduce block.
+
+**Acceptance criteria verified**:
+- [x] `training/edge/eval/decode_only.py` is a standalone module that
+  takes `(1, num_outputs, num_anchors)` raw + `imgsz` and produces the
+  same `{bbox, confidence}` list as `tflite_adapter`. Math cited
+  against `onnx_adapter._decode_yolo_onnx` in the docstring + parity
+  test.
+- [x] Real edge-bench run on iter-A's tflite at `runs=200` produced
+  `op_breakdown` with zero NMS/Detect-PostProcess ops; `verify_off_graph`
+  returns `off_graph=True`. `iter-G_off_graph_nms.json:verifier.status =
+  off_graph_confirmed`. Inference-only latency captured.
+- [x] In-graph-NMS handling: aggregator reads the verifier verdict and
+  flips `status="blocked"` with the offending op listed if the verifier
+  fails. Test `test_verify_off_graph_flags_in_graph_nms_op` exercises it.
+  No real candidate triggered the path on this run — both iter-A and
+  iter-F tflites cleared.
+- [x] `iter-G.md` explains decode lives in firmware C on the P4 host CPU
+  (NOT in TFLM) and budgets the post-process cost: ~0.0154 ms estimated
+  vs ~5,785 ms inference (~0.0003%). Negligible.
+- [x] `test_decode_only.py` has 8 tests (>=3 required); the three
+  AC-required tests are: parity (a), NMS dedup (b), verifier flags
+  in-graph NMS (c).
+- [x] `git diff main -- server/` is empty (0 lines).
+- [x] `pytest -p no:asyncio training/edge/tests/` — 183 passed, 0 failed.
+
+**Real numbers (runs=200 vs iter-A's runs=50)**:
+
+| metric | iter-A runs=50 | iter-G runs=200 | drift |
+|---|---:|---:|---:|
+| raw x86 us p50 | 1,164,102 | 1,156,898 | -0.62% |
+| raw x86 us p95 | 1,190,556 | 1,190,409 | -0.01% |
+| predicted P4 ms p50 (×5.0) | 5,820.5 | 5,784.5 | -0.62% |
+| predicted P4 fps | 0.1718 | 0.1729 | +0.0011 |
+
+**Learnings**:
+- ALL onnx2tf-produced YOLOv8 .tflites in the v2 frontier so far emit
+  ZERO in-graph NMS / Detect-PostProcess ops. The op_breakdown sees
+  CONV_2D, LOGISTIC, ADD, MUL, PAD, MAX_POOL_2D, RESIZE_NEAREST_NEIGHBOR,
+  RESHAPE, TRANSPOSE, SPLIT, CONCATENATION, STRIDED_SLICE, SUB, SOFTMAX,
+  QUANTIZE, DEQUANTIZE — backbone + neck + Detect-head convs through
+  the per-channel int8 weight scales, ending at the single fp32
+  DEQUANTIZE on the `(1, 5, 1029)` output. Decode + NMS are stripped.
+  This is the upstream contract of `ultralytics.YOLO(...).export(format='onnx',
+  ...)` followed by `onnx2tf` — neither inserts post-processing into
+  the TFLite graph. Future iterations that introduce alternative
+  exporters (e.g. ultralytics' built-in `format='tflite'` path, or
+  TF's own `SavedModel -> TFLite` for a model with embedded NMS) MUST
+  re-run `verify_off_graph` because TFLite_Detection_PostProcess is a
+  real op in the schema and IS emitted by the SSD-style export path.
+- runs=50 vs runs=200 stability: drift on this hardware is sub-1% on
+  p50 and effectively zero on p95. The runs=50 numbers iter-A through
+  iter-F carry are tight enough that re-running them at 200 wouldn't
+  shift any Pareto verdict. iter-H can cite the runs=50 numbers
+  uniformly without bias concerns.
+- Post-process cost is so far below inference that we can ignore it
+  entirely in the v2 SUMMARY: ~15 µs decode + NMS vs ~5,785 ms
+  inference at the P4 multiplier. Even if the multiplier turns out
+  optimistic (real boards measure 8x not 5x), inference will dominate
+  by 5+ orders of magnitude. The `decode_only.py` reference is mostly
+  load-bearing for the firmware C port's correctness, not its budget.
+- The IN_GRAPH_NMS_OPS set is conservative — it lists the four op
+  names the TFLite schema uses for post-processing
+  (TFLite_Detection_PostProcess for SSD, NON_MAX_SUPPRESSION_V4/V5
+  for newer exporters, and TF's CombinedNonMaxSuppression which can
+  survive into a custom TFLite delegate). Anything else is treated as
+  "not NMS". If a future architecture ships post-processing under a
+  different op name, add it to this set; the test
+  `test_in_graph_nms_ops_set_covers_known_exporter_outputs` is a
+  regression bumper for that change.
 

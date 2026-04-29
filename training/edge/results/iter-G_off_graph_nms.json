@@ -1,0 +1,184 @@
+{
+  "story_id": "iter-G",
+  "title": "NMS off-graph + decode optimization for inference-only latency",
+  "status": "passed",
+  "blocked_reason": null,
+  "model_path": "training/edge/models/yolov8n_cat_distilled_int8_pc.tflite",
+  "p4_multiplier": 5.0,
+  "p4_multiplier_source": "Conservative midpoint between scalar-reference (~6x x86) and vector-ext / dual-core ideal (~3x x86); v1 used 8.0 for ESP32-S3. Update once real ESP32-P4 measurements land.",
+  "verifier": {
+    "off_graph": true,
+    "offending_ops": [],
+    "status": "off_graph_confirmed",
+    "checked_op_count": 16,
+    "ops_seen": [
+      "ADD",
+      "CONCATENATION",
+      "CONV_2D",
+      "DEQUANTIZE",
+      "LOGISTIC",
+      "MAX_POOL_2D",
+      "MUL",
+      "PAD",
+      "QUANTIZE",
+      "RESHAPE",
+      "RESIZE_NEAREST_NEIGHBOR",
+      "SOFTMAX",
+      "SPLIT",
+      "STRIDED_SLICE",
+      "SUB",
+      "TRANSPOSE"
+    ]
+  },
+  "tflm_runs200": {
+    "story_id": "iter-G_offgraph",
+    "model_path": "training/edge/models/yolov8n_cat_distilled_int8_pc.tflite",
+    "model_size_bytes": 3221000,
+    "runs": 200,
+    "arena_size_bytes": 8388608,
+    "arena_used_bytes": 692912,
+    "input_bytes": 150528,
+    "output_bytes": 20580,
+    "schema_status": "ok",
+    "allocate_tensors_status": "ok",
+    "timed_invoke_status": "ok",
+    "profiler_overflowed": false,
+    "tflm_compatible": true,
+    "op_breakdown": [
+      {
+        "op_name": "ADD",
+        "count": 1600,
+        "total_us": 156897,
+        "percent": 0.068
+      },
+      {
+        "op_name": "CONCATENATION",
+        "count": 3800,
+        "total_us": 13780,
+        "percent": 0.006
+      },
+      {
+        "op_name": "CONV_2D",
+        "count": 12800,
+        "total_us": 214849572,
+        "percent": 92.484
+      },
+      {
+        "op_name": "DEQUANTIZE",
+        "count": 200,
+        "total_us": 518,
+        "percent": 0.0
+      },
+      {
+        "op_name": "LOGISTIC",
+        "count": 11600,
+        "total_us": 15379012,
+        "percent": 6.62
+      },
+      {
+        "op_name": "MAX_POOL_2D",
+        "count": 600,
+        "total_us": 104423,
+        "percent": 0.045
+      },
+      {
+        "op_name": "MUL",
+        "count": 11800,
+        "total_us": 999999,
+        "percent": 0.43
+      },
+      {
+        "op_name": "PAD",
+        "count": 1400,
+        "total_us": 167401,
+        "percent": 0.072
+      },
+      {
+        "op_name": "QUANTIZE",
+        "count": 600,
+        "total_us": 21199,
+        "percent": 0.009
+      },
+      {
+        "op_name": "RESHAPE",
+        "count": 1000,
+        "total_us": 1089,
+        "percent": 0.0
+      },
+      {
+        "op_name": "RESIZE_NEAREST_NEIGHBOR",
+        "count": 400,
+        "total_us": 2214,
+        "percent": 0.001
+      },
+      {
+        "op_name": "SOFTMAX",
+        "count": 200,
+        "total_us": 576690,
+        "percent": 0.248
+      },
+      {
+        "op_name": "SPLIT",
+        "count": 1600,
+        "total_us": 19304,
+        "percent": 0.008
+      },
+      {
+        "op_name": "STRIDED_SLICE",
+        "count": 800,
+        "total_us": 876,
+        "percent": 0.0
+      },
+      {
+        "op_name": "SUB",
+        "count": 400,
+        "total_us": 4762,
+        "percent": 0.002
+      },
+      {
+        "op_name": "TRANSPOSE",
+        "count": 800,
+        "total_us": 11647,
+        "percent": 0.005
+      }
+    ],
+    "raw_x86_us_p50": 1156898.0,
+    "raw_x86_us_p95": 1190409.0,
+    "raw_x86_us_min": 1142269.0,
+    "raw_x86_us_max": 1199130.0,
+    "raw_x86_us_mean": 1161646.0,
+    "x86_to_s3_multiplier": 8.0,
+    "predicted_s3_us_p50": 9255184.0,
+    "predicted_s3_us_p95": 9523272.0,
+    "predicted_s3_fps": 0.10804755475417885,
+    "binary": "/home/phetamine/.archon/workspaces/sudosurmrf/catzap/worktrees/archon/thread-5bcc925a/firmware/edge-bench/build/edgebench",
+    "tflm_commit": "51bee03bed4776f1de88dd87226ff8c260f88e3c"
+  },
+  "inference_only_latency": {
+    "runs": 200,
+    "raw_x86_us_p50": 1156898.0,
+    "raw_x86_us_p95": 1190409.0,
+    "predicted_p4_ms_p50": 5784.49,
+    "predicted_p4_ms_p95": 5952.045,
+    "predicted_p4_fps": 0.17287608760668616
+  },
+  "drift_vs_runs50": {
+    "iter_a_runs50_x86_us_p50": 1164102.0,
+    "iter_a_runs50_x86_us_p95": 1190556.0,
+    "p50_drift_pct": -0.619,
+    "p95_drift_pct": -0.012
+  },
+  "post_process_budget": {
+    "model_anchors_at_imgsz_224": 1029,
+    "estimated_decode_nms_ms_at_p4_no_esp_dl": 0.0154,
+    "decode_to_inference_ratio_pct": 0.0003,
+    "comment": "decode + NMS (host C, no ESP-DL) is dominated by a single linear scan over ~1029 anchors at imgsz=224; estimated at ~15 us / 0.015 ms vs ~6 s inference, so post-process is <<0.001x of inference and can be ignored in the v2 frontier."
+  },
+  "iter_a_baseline_metrics": {
+    "map50": 0.2154782597952959,
+    "size_bytes": 3221000,
+    "arena_used_bytes": 692912,
+    "predicted_p4_latency_ms_p50": 5820.51,
+    "predicted_p4_fps": 0.17180625065501132
+  }
+}

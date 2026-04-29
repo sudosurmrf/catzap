@@ -445,8 +445,8 @@
         "iter-F"
       ],
       "priority": 19,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented in iteration. Files: training/edge/eval/decode_only.py (off-graph YOLOv8 decode + single-class NMS + IN_GRAPH_NMS_OPS verifier; cites onnx_adapter._decode_yolo_onnx for bbox math); training/edge/tests/test_decode_only.py (8 tests: parity vs _decode_yolo_onnx, NMS dedup, full pipeline round-trip, shape-fallback, 3 verifier cases incl. iter-A op set passes); training/edge/results/aggregate_iter_g.py + write_iter_g_md.py + iter-G_off_graph_nms.json + iter-G.md + iter-G_offgraph-tflm.json. Real edge-bench at runs=200 confirms zero NMS/Detect-PostProcess ops (16 ops: ADD/CONV_2D/LOGISTIC/etc); inference-only x86 p50=1,156,898 us (predicted P4 p50=5,784.5 ms at multiplier 5.0, fps=0.1729); drift vs iter-A runs=50 p50=-0.62%, p95=-0.01%. Post-process budget: estimated 0.0154 ms decode+NMS at P4 (no ESP-DL) = 0.0003% of inference time, negligible. server/ untouched, 183/183 edge tests pass."
     },
     {
       "id": "iter-H",
