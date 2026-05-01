@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState, useCallback } from "react";
-import type { Zone, Detection, ZoneTransform } from "../types";
+import type { Zone, Furniture, Detection, ZoneTransform } from "../types";
 import { DEFAULT_TRANSFORM } from "../types";
 
 interface PanoramaViewProps {
   panoramaBase64: string | null;
   zones: Zone[];
+  furniture?: Furniture[];
   detections: Detection[];
   servoPan: number;
   servoTilt: number;
@@ -45,7 +46,7 @@ const HANDLE_SIZE = 7;
 const SKEW_HANDLE_SIZE = 5;
 
 export default function PanoramaView({
-  panoramaBase64, zones, detections,
+  panoramaBase64, zones, furniture = [], detections,
   servoPan, servoTilt,
   sweepPanMin, sweepPanMax, sweepTiltMin, sweepTiltMax,
   fovH, fovV,
@@ -593,6 +594,27 @@ export default function PanoramaView({
         ctx.fillStyle = isDragging ? "rgba(34, 211, 238, 0.9)" : "rgba(239, 68, 68, 0.8)";
         ctx.font = "500 10px 'IBM Plex Mono', monospace";
         ctx.fillText(zone.name, basePixels[0].x, basePixels[0].y - 4);
+      }
+    }
+
+    // Draw furniture outlines
+    for (const item of furniture) {
+      const pts = item.polygon.map(([pan, tilt]) => angleToPx(pan, tilt, w, h));
+      if (pts.length < 2) continue;
+      ctx.strokeStyle = "rgba(168, 162, 158, 0.6)";
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([4, 3]);
+      ctx.beginPath();
+      pts.forEach((p, i) => { if (i === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y); });
+      ctx.closePath();
+      ctx.stroke();
+      ctx.fillStyle = "rgba(168, 162, 158, 0.06)";
+      ctx.fill();
+      ctx.setLineDash([]);
+      if (pts.length > 0) {
+        ctx.fillStyle = "rgba(168, 162, 158, 0.8)";
+        ctx.font = "500 10px 'IBM Plex Mono', monospace";
+        ctx.fillText(item.name, pts[0].x, pts[0].y - 4);
       }
     }
 

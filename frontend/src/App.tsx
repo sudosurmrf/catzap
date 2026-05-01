@@ -8,9 +8,9 @@ import ZoneConfigPanel from "./components/ZoneConfigPanel";
 import Settings from "./components/Settings";
 import SweepControls from "./components/SweepControls";
 import AimCalibration from "./components/AimCalibration";
-import type { Zone, Detection, FrameData, ZoneTransform } from "./types";
+import type { Zone, Furniture, Detection, FrameData, ZoneTransform } from "./types";
 import { DEFAULT_TRANSFORM } from "./types";
-import { getZones, setVirtualAngle, updateZone } from "./api/client";
+import { getZones, getFurniture, setVirtualAngle, updateZone } from "./api/client";
 
 type Panel = "events" | "stats" | "controls" | "settings";
 const EMPTY_DETECTIONS: Detection[] = [];
@@ -28,6 +28,7 @@ export default function App() {
   const [panel, setPanel] = useState<Panel>("events");
   const [aimCalibrationOpen, setAimCalibrationOpen] = useState(false);
   const [zones, setZones] = useState<Zone[]>([]);
+  const [furniture, setFurniture] = useState<Furniture[]>([]);
   const [editingZones, setEditingZones] = useState(false);
   const [latestPanorama, setLatestPanorama] = useState<string | null>(null);
   const [latestDetections, setLatestDetections] = useState<Detection[]>([]);
@@ -48,6 +49,7 @@ export default function App() {
 
   useEffect(() => {
     getZones().then(setZones).catch(console.error);
+    getFurniture().then(setFurniture).catch(console.error);
   }, []);
 
   const refreshZones = useCallback(() => getZones().then(setZones).catch(console.error), []);
@@ -224,6 +226,7 @@ export default function App() {
           <PanoramaView
             panoramaBase64={latestPanorama}
             zones={zones}
+            furniture={furniture}
             detections={latestDetections}
             servoPan={servoPan}
             servoTilt={servoTilt}

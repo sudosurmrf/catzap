@@ -155,16 +155,14 @@ class MJPEGStreamReader:
                     break
                 jpg_bytes = buf[start : end + 2]
                 buf = buf[end + 2 :]
-                frame = cv2.imdecode(
-                    np.frombuffer(jpg_bytes, dtype=np.uint8), cv2.IMREAD_COLOR
-                )
-                if frame is not None:
-                    if self._frame_queue.full():
-                        try:
-                            self._frame_queue.get_nowait()
-                        except asyncio.QueueEmpty:
-                            pass
-                    self._loop.call_soon_threadsafe(self._frame_queue.put_nowait, (frame, jpg_bytes))
+                # Queue raw JPEG bytes — defer cv2.imdecode to read_frame()
+                # so dropped frames never pay the decode cost.
+                if self._frame_queue.full():
+                    try:
+                        self._frame_queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        pass
+                self._loop.call_soon_threadsafe(self._frame_queue.put_nowait, jpg_bytes)
 
         self._connected = False
         logger.info("ESP32-CAM stream read loop ended")
@@ -178,11 +176,17 @@ class MJPEGStreamReader:
                 logger.warning(f"Reconnect failed: {e}")
                 return None
         try:
-            return await asyncio.wait_for(self._frame_queue.get(), timeout=5.0)
+            jpg_bytes = await asyncio.wait_for(self._frame_queue.get(), timeout=5.0)
         except asyncio.TimeoutError:
             logger.warning("ESP32-CAM stream timed out waiting for frame, will reconnect")
             self._connected = False
             return None
+        frame = cv2.imdecode(
+            np.frombuffer(jpg_bytes, dtype=np.uint8), cv2.IMREAD_COLOR
+        )
+        if frame is None:
+            return None
+        return (frame, jpg_bytes)
 
     async def close(self):
         self._stop.set()

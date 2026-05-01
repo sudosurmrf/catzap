@@ -13,12 +13,12 @@ class Settings(BaseSettings):
     # Vision
     detection_model: str = "yolov8n.pt"  # yolov8n.pt (fast) | yolov8s.pt (balanced) | yolov8m.pt (accurate)
     detection_imgsz: int = 640  # input resolution for YOLO — higher catches distant cats
-    confidence_threshold: float = 0.25  # lowered from 0.35 to catch distant low-confidence cats
+    confidence_threshold: float = 0.25 
     classifier_confidence_threshold: float = 0.6
     classifier_uncertain_min: float = 0.3
     classify_every_n_frames: int = 30
     overlap_threshold: float = 0.3
-    frame_skip_n: int = 1  # submit every frame; the inference worker's empty-queue gate already prevents pile-up
+    frame_skip_n: int = 2  # submit every 2nd frame; detection smoother bridges the gaps
     vision_loop_interval: float = 0.1  # seconds between vision loop iterations (~10 FPS)
 
     # Sweep / Panorama

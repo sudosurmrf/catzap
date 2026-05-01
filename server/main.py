@@ -33,13 +33,14 @@ from server.actuator.calibration import (
 
 logger = logging.getLogger(__name__)
 
-# Shared state
+# #graphify/state [[CatZap Runtime State]] - singletons shared by FastAPI routes and
+# the [[CatZap Vision Loop]] while the application process is alive.
 _tile_grid: TileGrid | None = None
 _sweep_controller: SweepController | None = None
 _actuator: ActuatorClient | None = None
 _classifier: CatClassifier | None = None
 _classify_frame_counter: int = 0
-_cached_identities: dict[tuple[float, float], tuple[str, float]] = {}  # (cx, cy) -> (name, conf)
+_cached_identities: dict[tuple[float, float], tuple[str, float]] = {}  # #graphify/identity [[Cat Identity Cache]] maps bbox center `(cx, cy)` to `(name, confidence)`.
 
 
 def get_tile_grid() -> TileGrid:
@@ -55,7 +56,7 @@ def get_actuator() -> ActuatorClient:
 
 
 def reload_classifier():
-    """Reload classifier weights after training."""
+    """#graphify/identity [[Cat Classifier Reload]] refreshes trained identity weights."""
     global _classifier
     if _classifier is not None:
         weights_path = settings.classifier_weights_dir / "cat_classifier.pt"
@@ -69,7 +70,8 @@ async def run_vision_loop(app_state: dict):
     logger.info(f"ESP32-CAM URL: {settings.esp32_cam_url}")
     logger.info(f"ESP32 Actuator URL: {settings.esp32_actuator_url}")
 
-    # Connect to camera FIRST, before loading heavy models
+    # #graphify/startup [[Camera Connection]] must happen before [[YOLO Detector]]
+    # initialization so camera failures exit cheaply before loading heavy models.
     cap = None
     reader = None
     if settings.dev_mode:
@@ -106,8 +108,8 @@ async def run_vision_loop(app_state: dict):
 
     _actuator = ActuatorClient(base_url=settings.esp32_actuator_url)
 
-    # Load rig settings FIRST so bounds (if calibrated) are applied to both
-    # the tile grid and sweep controller at init time.
+    # #graphify/calibration [[Rig Settings]] load before [[Tile Grid]] and
+    # [[Sweep Controller]] so calibrated bounds shape both systems at startup.
     _rig_settings = load_rig_settings()
     set_rig_settings(_rig_settings)
     if _rig_settings.tilt_jog_inverted or _rig_settings.pan_jog_inverted:
@@ -116,9 +118,9 @@ async def run_vision_loop(app_state: dict):
             f"pan_inverted={_rig_settings.pan_jog_inverted}"
         )
 
-    # Use calibrated extent bounds if present, else fall back to config.
-    # Bounds are populated by the extent-capture phase of calibration and
-    # persisted in rig_settings.json so they survive restarts.
+    # #graphify/calibration [[Calibrated Extent Bounds]] come from the
+    # [[Extent Capture]] phase and persist in [[rig_settings.json]]; when absent,
+    # [[Sweep Defaults]] from config define pan and tilt limits.
     pan_min = _rig_settings.pan_min if _rig_settings.pan_min is not None else settings.sweep_pan_min
     pan_max = _rig_settings.pan_max if _rig_settings.pan_max is not None else settings.sweep_pan_max
     tilt_min = _rig_settings.tilt_min if _rig_settings.tilt_min is not None else settings.sweep_tilt_min
@@ -142,12 +144,10 @@ async def run_vision_loop(app_state: dict):
         tile_overlap=settings.tile_overlap,
     )
 
-    # Load persisted calibration (from a prior successful run) if present.
-    # The new Calibration schema doesn't carry a bilinear fit anymore — it
-    # just records the extent corners, tile grid dimensions, and verification
-    # residuals. The runtime behavior is driven by rig_settings bounds (loaded
-    # above) and the analytic pinhole FOV; the Calibration record is mostly
-    # for display/history and future per-tile refinement.
+    # #graphify/calibration [[Persisted Calibration]] is historical display data:
+    # extent corners, [[Tile Grid]] dimensions, and verification residuals.
+    # Runtime aiming uses [[Rig Settings]] bounds plus [[Analytic Pinhole FOV]],
+    # leaving this record available for future per-tile refinement.
     _persisted_cal = load_calibration()
     if _persisted_cal is not None:
         set_active_calibration(_persisted_cal)
@@ -173,53 +173,60 @@ async def run_vision_loop(app_state: dict):
         dev_mode=settings.dev_mode,
     )
 
-    # Per-cat identity classifier is disabled. The YOLO detector still
-    # detects "is this a cat" — we just skip the second-stage MobileNet
-    # classifier that maps a crop to a specific cat name. Frees ~50-200ms
-    # of CPU per inference cycle, which is the main reason detection felt
-    # sluggish whenever a cat was in view. Re-enable by uncommenting and
-    # restoring the cached_identities propagation in the inference worker.
+    # #graphify/actuator [[Servo Boot Pose]] starts at pan=90 and tilt=45 so the
+    # first [[Actuator Goto]] is a no-op. Syncing `_sweep_t` lets the
+    # [[Boustrophedon Sweep]] continue from the physical boot position.
+    _sweep_controller.current_pan = 90.0
+    _sweep_controller.current_tilt = 45.0
+    _sweep_controller._sync_sweep_to_current_position()
+    _actuator._last_sent_pan = 90
+    _actuator._last_sent_tilt = 45
+
+    # #graphify/identity [[Cat Identity Classifier]] is disabled here. The
+    # [[YOLO Detector]] still answers "is this a cat", while the second-stage
+    # [[MobileNet Identity Classifier]] is skipped to save roughly 50-200 ms per
+    # inference cycle. Re-enable by restoring [[Cat Identity Cache]] propagation.
     _classifier = None
 
     last_time = time.time()
     frame_count = 0
     cached_pano_b64: str | None = None
 
-    # Zone cache: pulled from DB only when the version counter bumps. Avoids
-    # an async pool acquire on every iteration of the vision loop.
+    # #graphify/stability [[Startup Stabilization]] ignores early detections for
+    # about two seconds so [[Camera Auto Exposure]] artifacts do not trigger
+    # phantom [[Cat Tracking]] jumps before the feed settles.
+    _warmup_frames_remaining = 20
+
+    # #graphify/zones [[Zone Cache]] refreshes from the database only when
+    # [[Zone Version Counter]] changes, avoiding a pool acquire on each loop.
     cached_zones: list = []
     cached_zones_version: int = -1
 
-    # Panorama tile refresh decimator: per-frame stitching is wasted work for
-    # a UI element nobody watches at full FPS. Throttle to ~5 Hz wall clock.
+    # #graphify/panorama [[Panorama Tile Refresh]] is decimated to about 5 Hz
+    # because [[Panorama Canvas]] is a reference view, not the live video feed.
     last_tile_refresh_time: float = 0.0
 
-    # Track the last pan/tilt we actually sent to the ESP32 (as the int the
-    # firmware will write). The main loop only re-sends when this changes —
-    # prevents the 10 Hz goto() spam from racing with direct gotos (jog,
-    # fire-path) on the shared httpx client, which was causing the pan servo
-    # to ring.
+    # #graphify/actuator [[Servo Command Deduplication]] stores the last integer
+    # pan/tilt sent to [[ESP32 Actuator Firmware]]. This prevents 10 Hz
+    # [[Actuator Goto]] spam from racing with direct jog and fire-path commands.
     _last_sent_pan_int: int | None = None
     _last_sent_tilt_int: int | None = None
 
-    # In-flight goto guard. The dedupe block below spawns gotos as fire-and-
-    # forget tasks; if the network is degraded each task takes ~2s to time
-    # out and they pile up unbounded on the actuator's traverse_lock. Holding
-    # a single reference and skipping new spawns while one is still pending
-    # caps the queue depth at 1 — under failure we drop intermediate poses
-    # rather than queue them, which is the right tradeoff for a tracking rig.
+    # #graphify/actuator [[In-Flight Goto Guard]] caps pending traverse work at
+    # one task. Under degraded network conditions, [[Tracking Rig]] drops
+    # intermediate poses instead of queueing stale [[Actuator Goto]] commands.
     _goto_task: asyncio.Task | None = None
 
-    # Detection smoother: holds recent detections for a grace window so
-    # single-frame YOLO misses don't cause flicker.
+    # #graphify/vision [[Detection Smoother]] holds recent detections briefly so
+    # single-frame [[YOLO Detector]] misses do not create UI or tracking flicker.
     smoothed_dets: list[dict] = []   # [{bbox, confidence, _last_seen, _id}]
     det_hold_time = 0.4              # seconds to hold a detection after YOLO loses it
     det_match_threshold = 0.15       # max bbox-center distance (normalized) to match
     det_next_id = 0
 
-    # ── Background inference state ──────────────────
-    # YOLO + classification + depth run in a single persistent worker thread so
-    # the main loop can keep streaming frames without blocking on inference.
+    # #graphify/vision [[Background Inference Worker]] runs detection,
+    # classification, and depth-related state in one persistent thread so the
+    # [[CatZap Vision Loop]] can keep streaming frames while inference runs.
     _infer_lock = threading.Lock()
     _latest_raw_dets: list[dict] = []        # written by inference thread
     _latest_inf_pan: float = 0.0             # servo pan at time the published frame was captured
@@ -229,9 +236,12 @@ async def run_vision_loop(app_state: dict):
     _infer_stop = threading.Event()
 
     def _inference_worker():
-        """Persistent worker thread — processes one frame at a time from the queue."""
+        """#graphify/vision [[Background Inference Worker]] processes queued frames one at a time."""
         nonlocal _latest_raw_dets, _latest_inf_pan, _latest_inf_tilt, _new_results_ready
         global _cached_identities
+
+        _det_latencies_ms: list[float] = []
+        _last_latency_log = time.perf_counter()
 
         while not _infer_stop.is_set():
             try:
@@ -241,9 +251,25 @@ async def run_vision_loop(app_state: dict):
             inf_frame, inf_servo_pan, inf_servo_tilt, do_classify = job
 
             try:
+                _det_t0 = time.perf_counter()
                 raw_dets = detector.detect(inf_frame)
+                _det_latencies_ms.append((time.perf_counter() - _det_t0) * 1000.0)
 
-                # Classify cats if due
+                _now_log = time.perf_counter()
+                if _now_log - _last_latency_log >= 10.0 and _det_latencies_ms:
+                    _samples = sorted(_det_latencies_ms)
+                    _n = len(_samples)
+                    _p50 = _samples[_n // 2]
+                    _p95 = _samples[min(_n - 1, int(_n * 0.95))]
+                    logger.info(
+                        f"YOLO detect latency (n={_n}, last ~10s): "
+                        f"p50={_p50:.1f}ms p95={_p95:.1f}ms max={_samples[-1]:.1f}ms"
+                    )
+                    _det_latencies_ms.clear()
+                    _last_latency_log = _now_log
+
+                # #graphify/identity [[Cat Classification Cadence]] runs identity
+                # classification only on scheduled frames.
                 if do_classify and _classifier is not None and _classifier.model is not None:
                     new_identities: dict[tuple[float, float], tuple[str, float]] = {}
                     for det in raw_dets:
@@ -297,44 +323,35 @@ async def run_vision_loop(app_state: dict):
             finally:
                 del inf_frame  # explicitly release frame copy
 
-    # Start the single persistent inference worker
+    # #graphify/vision [[Background Inference Worker]] starts once and stays alive
+    # for the duration of the [[CatZap Vision Loop]].
     _infer_thread = threading.Thread(target=_inference_worker, daemon=True)
     _infer_thread.start()
 
     try:
         while app_state.get("running", True):
             now = time.time()
-            dt = now - last_time
+            dt = min(now - last_time, 0.5)
             last_time = now
 
-            # Advance state machine
+            # #graphify/control [[Sweep State Machine]] advances once per loop tick.
             _sweep_controller.tick(dt)
 
-            # Command servos to current position (sweep or tracking). Dedupe
-            # against the last-sent SERVO-SNAPPED angle — ActuatorClient snaps
-            # to the mechanical 2° resolution before sending, so the dedupe
-            # must use the same snap function or we'd skip sends whenever the
-            # intended float moves past a 2°-boundary.
+            # #graphify/actuator [[Servo Command Deduplication]] compares against
+            # the last [[Servo-Snapped Angle]]. [[ActuatorClient]] snaps to the
+            # mechanical 2-degree resolution, so dedupe uses the same boundary.
             if not settings.dev_mode:
                 pan_int = snap_to_servo_step(_sweep_controller.current_pan)
                 tilt_int = snap_to_servo_step(_sweep_controller.current_tilt)
                 if pan_int != _last_sent_pan_int or tilt_int != _last_sent_tilt_int:
-                    # Fire-and-forget rate-limited traverse: routes through
-                    # _actuator.goto() (no direct=True), which sub-steps the
-                    # move in 6°/30ms increments. For sweep this is identical
-                    # to the legacy 1° behavior because each sweep iteration
-                    # only advances current_pan by a fraction of a degree —
-                    # the dedupe rarely crosses a 1° boundary, and when it
-                    # does the traverse runs as a single sub-step with no
-                    # sleep. For tracking jumps the moderate pacing lets the
-                    # camera capture multiple detection frames during the
-                    # move so the targeting can refine instead of overshoot.
+                    # #graphify/actuator [[Rate-Limited Traverse]] uses
+                    # `_actuator.goto()` without direct mode, stepping large moves
+                    # in 6-degree / 30 ms increments so [[Cat Tracking]] can refine
+                    # while the camera is moving.
                     #
-                    # Skip-while-pending guard: if the previous goto is still
-                    # in-flight (slow link, big tracking traverse, etc.), drop
-                    # this iteration's goto rather than queueing another task.
-                    # The next iteration will reattempt with the latest pose.
-                    # Caps in-flight goto count at exactly 1 — no backlog.
+                    # #graphify/actuator [[Skip While Pending]] reattempts with
+                    # the latest pose on the next loop and keeps [[Actuator Goto]]
+                    # backlog depth at one.
                     if _goto_task is None or _goto_task.done():
                         _goto_task = asyncio.create_task(
                             _actuator.goto(
@@ -345,9 +362,9 @@ async def run_vision_loop(app_state: dict):
                         _last_sent_pan_int = pan_int
                         _last_sent_tilt_int = tilt_int
 
-            # Grab frame. In production we also receive the original JPEG
-            # bytes alongside the decoded numpy array — the websocket
-            # broadcast can re-emit those without paying for a re-encode.
+            # #graphify/video [[Frame Capture]] returns decoded pixels and, in
+            # production, original JPEG bytes from [[ESP32-CAM]]. WebSocket
+            # broadcast can reuse those bytes without re-encoding.
             jpg_bytes: bytes | None = None
             if settings.dev_mode:
                 ret, frame = cap.read()
@@ -364,31 +381,33 @@ async def run_vision_loop(app_state: dict):
             servo_pan = _sweep_controller.current_pan
             servo_tilt = _sweep_controller.current_tilt
 
-            # Cache latest frame for depth estimation API
+            # #graphify/depth [[Latest Frame Cache]] feeds the depth-estimation API.
             store_latest_frame(frame, servo_pan, servo_tilt)
 
-            # Paint the current frame onto the panorama canvas at its servo
-            # angle. Throttled to ~5 Hz — the panorama is a background
-            # reference, not a real-time feed.
+            # #graphify/panorama [[Panorama Canvas]] paints each sampled frame at
+            # its current [[Servo Pose]] and is throttled as a background reference.
             if (now - last_tile_refresh_time) >= 0.2:
                 _tile_grid.paint_frame(servo_pan, servo_tilt, frame)
                 last_tile_refresh_time = now
 
-            # ── Submit inference job if worker is idle ──────
+            # #graphify/vision [[Inference Queue]] receives work only when the
+            # [[Background Inference Worker]] is idle.
             global _classify_frame_counter, _cached_identities
             frame_count += 1
             if _infer_queue.empty() and frame_count % settings.frame_skip_n == 0:
                 _classify_frame_counter += 1
                 do_classify = (_classify_frame_counter % settings.classify_every_n_frames == 0)
-                # Copy frame so the worker thread owns its data; drop if queue full
+                # #graphify/vision [[Frame Ownership]] copies the frame for the
+                # worker thread; a full queue means the current frame is dropped.
                 try:
                     _infer_queue.put_nowait(
                         (frame.copy(), servo_pan, servo_tilt, do_classify)
                     )
                 except queue.Full:
-                    pass  # worker still busy — skip this frame
+                    pass  # #graphify/vision [[Inference Backpressure]] skips frames while the worker is busy.
 
-            # ── Consume latest inference results if available ──
+            # #graphify/vision [[Inference Results]] are consumed opportunistically
+            # when the worker publishes fresh detections.
             raw_detections = None
             inf_pose_pan = servo_pan   # fallback if no new results this iteration
             inf_pose_tilt = servo_tilt
@@ -401,7 +420,8 @@ async def run_vision_loop(app_state: dict):
                     _new_results_ready = False
 
             if raw_detections is not None:
-                # ── Smooth detections across frames ──────────────
+                # #graphify/vision [[Detection Smoother]] matches raw detections
+                # to recent track IDs across frames.
                 matched_ids: set[int] = set()
                 for rd in raw_detections:
                     rc = ((rd["bbox"][0] + rd["bbox"][2]) / 2,
@@ -436,15 +456,15 @@ async def run_vision_loop(app_state: dict):
                         })
                         det_next_id += 1
 
-            # Expire stale entries
+            # #graphify/vision [[Detection Expiration]] removes tracks outside the hold window.
             smoothed_dets = [
                 sd for sd in smoothed_dets
                 if (now - sd["_last_seen"]) < det_hold_time
             ]
 
-            # Build the detections list for this frame. We forward _pose_pan/_pose_tilt
-            # under dunder keys so the angle-conversion loop can use each detection's
-            # capture-time pose (eliminates stale-pose targeting drift).
+            # #graphify/vision [[Capture-Time Pose]] is forwarded with each
+            # detection so [[Angle Conversion]] uses the servo pose from the frame
+            # that produced the detection, preventing stale-pose targeting drift.
             detections = [
                 {
                     **{k: v for k, v in sd.items() if not k.startswith("_")},
@@ -455,19 +475,16 @@ async def run_vision_loop(app_state: dict):
                 for sd in smoothed_dets
             ]
 
-            # Convert detections to angle-space and check zones.
+            # #graphify/targeting [[Angle Conversion]] maps detections into pan
+            # and tilt space before [[Zone Violation Check]].
             #
-            # Two-state pursuit: the controller follows ANY visible cat
-            # (TRACKING) and additionally fires when the tracked cat enters an
-            # exclusion zone (ENGAGING). The selection pass below picks two
-            # targets per frame:
-            #   - engagement_target: cat in a zone, closest to current aim
-            #   - tracking_target:   any cat, closest to current aim
-            # We dispatch to the controller based on which (if any) exist.
-            # Zones rarely change at runtime — only refresh when the version
-            # counter (bumped on every create/update/delete) advances. This
-            # eliminates the per-frame async pool acquire that was costing
-            # ~1-2ms on every iteration even when nothing had changed.
+            # #graphify/control [[Two-State Pursuit]] follows any visible cat in
+            # TRACKING and fires only when a tracked cat enters an exclusion zone
+            # in ENGAGING. Each frame selects [[Engagement Target]] and
+            # [[Tracking Target]] candidates nearest the current aim.
+            #
+            # #graphify/zones [[Zone Cache]] refreshes only when
+            # [[Zone Version Counter]] advances, saving the per-frame database hit.
             current_version = get_zones_version()
             if current_version != cached_zones_version:
                 cached_zones = await get_zones()
@@ -495,9 +512,8 @@ async def run_vision_loop(app_state: dict):
                 cat_pan = (pan1 + pan2) / 2
                 cat_tilt = (tilt1 + tilt2) / 2
 
-                # Bbox center in normalized [0..1] frame coordinates — used
-                # later for the tracking deadband check (skip the camera
-                # move if the cat is already near frame center).
+                # #graphify/targeting [[Bounding Box Center]] uses normalized
+                # frame coordinates for the later [[Tracking Deadband]] check.
                 bbox_cx = (bbox[0] + bbox[2]) / 2
                 bbox_cy = (bbox[1] + bbox[3]) / 2
 
@@ -514,12 +530,12 @@ async def run_vision_loop(app_state: dict):
                     + (clamped_tilt - current_aim_tilt) ** 2
                 )
 
-                # Every detected cat is a tracking candidate.
+                # #graphify/targeting [[Tracking Target]] can be any detected cat.
                 if dist < best_tracking_dist:
                     best_tracking_dist = dist
                     tracking_target = (clamped_pan, clamped_tilt, det, bbox_cx, bbox_cy)
 
-                # Cats inside zones are also engagement candidates.
+                # #graphify/targeting [[Engagement Target]] requires a cat inside an exclusion zone.
                 violations = check_zone_violations(angle_bbox, current_zones)
                 all_violations.extend(violations)
                 if violations and dist < best_engagement_dist:
@@ -532,7 +548,11 @@ async def run_vision_loop(app_state: dict):
                         violations[0]["overlap"],
                     )
 
-            if engagement_target is not None:
+            # #graphify/stability [[Startup Stabilization]] lets the UI display
+            # detections during warmup while blocking servo targeting decisions.
+            if _warmup_frames_remaining > 0:
+                _warmup_frames_remaining -= 1
+            elif engagement_target is not None:
                 tgt_pan, tgt_tilt, zone_name, v_det, overlap = engagement_target
                 _sweep_controller.on_cat_in_zone(tgt_pan, tgt_tilt, zone_name)
 
@@ -567,12 +587,10 @@ async def run_vision_loop(app_state: dict):
                     }))
             elif tracking_target is not None:
                 tgt_pan, tgt_tilt, _, tgt_cx, tgt_cy = tracking_target
-                # Deadband check: if the cat's bbox center is already inside
-                # the deadband radius around frame center (0.5, 0.5), the rig
-                # is "close enough" — hold position rather than chasing the
-                # last few pixels of YOLO bbox jitter. on_cat_in_deadband
-                # still resets the grace timer so we don't drop back to
-                # SWEEPING while the cat sits centered in front of us.
+                # #graphify/targeting [[Tracking Deadband]] holds position when
+                # the cat is near frame center, avoiding [[YOLO Jitter]] while
+                # still resetting the grace timer so state does not fall back to
+                # SWEEPING during a centered sighting.
                 dx = tgt_cx - 0.5
                 dy = tgt_cy - 0.5
                 pixel_dist = (dx * dx + dy * dy) ** 0.5
@@ -583,7 +601,8 @@ async def run_vision_loop(app_state: dict):
             else:
                 _sweep_controller.on_no_cat_detected()
 
-            # Direction delta for dev mode arrow — shown during TRACKING and ENGAGING
+            # #graphify/dev-mode [[Direction Delta]] drives the dev-mode arrow in
+            # TRACKING and ENGAGING states.
             if settings.dev_mode and _sweep_controller.state in (SweepState.TRACKING, SweepState.ENGAGING):
                 if engagement_target is not None:
                     dd_pan, dd_tilt, _, _, _ = engagement_target
@@ -592,11 +611,9 @@ async def run_vision_loop(app_state: dict):
                     dd_pan, dd_tilt, _, _, _ = tracking_target
                     direction_delta = _sweep_controller.get_direction_delta(dd_pan, dd_tilt)
 
-            # Only encode and broadcast when WebSocket clients are connected.
-            # In production, jpg_bytes already came in from the ESP32-CAM —
-            # we re-emit them verbatim instead of decode→numpy→re-encode,
-            # which was burning ~15-30ms per frame for no reason. Dev mode
-            # uses cv2.VideoCapture (raw numpy), so it still has to encode.
+            # #graphify/streaming [[WebSocket Broadcast]] encodes frames only
+            # when clients are connected. In production, [[ESP32-CAM JPEG Bytes]]
+            # are re-emitted directly instead of decode -> numpy -> re-encode.
             if has_feed_clients():
                 if jpg_bytes is not None:
                     frame_b64 = base64.b64encode(jpg_bytes).decode("utf-8")
@@ -604,15 +621,14 @@ async def run_vision_loop(app_state: dict):
                     _, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
                     frame_b64 = base64.b64encode(buffer).decode("utf-8")
 
-                # Only re-encode panorama when tiles have actually changed
+                # #graphify/panorama [[Panorama Encoding]] runs only when tiles are dirty.
                 if _tile_grid._pano_dirty:
                     pano_jpeg = _tile_grid.get_panorama_jpeg()
                     cached_pano_b64 = base64.b64encode(pano_jpeg).decode("utf-8") if pano_jpeg else None
 
-                # Expose the PHYSICAL (servo-snapped) pose to clients, not the
-                # float intent. This is the decoupling boundary: internally we
-                # track continuous float state for precision, but what gets
-                # broadcast to the UI is what the servo has actually achieved.
+                # #graphify/api [[Physical Servo Pose]] is broadcast to clients
+                # instead of float intent. [[Internal Float Pose]] keeps precision
+                # while the UI sees the snapped pose the servo can actually reach.
                 await broadcast_to_clients({
                     "frame": frame_b64,
                     "panorama": cached_pano_b64,
@@ -626,10 +642,9 @@ async def run_vision_loop(app_state: dict):
                     "direction_delta": direction_delta,
                 })
 
-            # Sleep only the time we have left in the target frame budget.
-            # The previous unconditional sleep added latency every iteration
-            # regardless of how long the iteration already took, capping the
-            # achievable rate even when the inner work was already slow.
+            # #graphify/performance [[Frame Budget Sleep]] waits only for the
+            # remaining loop interval so slow iterations do not receive extra
+            # latency from unconditional sleeping.
             elapsed = time.time() - now
             remaining = settings.vision_loop_interval - elapsed
             if remaining > 0:
